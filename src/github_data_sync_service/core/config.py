@@ -24,8 +24,16 @@ class Settings(BaseSettings):
     github_connect_timeout_seconds: float = Field(default=5, alias="GITHUB_CONNECT_TIMEOUT_SECONDS")
     github_read_timeout_seconds: float = Field(default=15, alias="GITHUB_READ_TIMEOUT_SECONDS")
     github_max_attempts: int = Field(default=3, ge=1, alias="GITHUB_MAX_ATTEMPTS")
+    github_issues_per_page: int = Field(default=100, ge=1, le=100, alias="GITHUB_ISSUES_PER_PAGE")
+    github_max_pages_per_sync: int = Field(default=1000, ge=1, alias="GITHUB_MAX_PAGES_PER_SYNC")
     worker_poll_interval_seconds: float = Field(
         default=5, ge=0, alias="WORKER_POLL_INTERVAL_SECONDS"
+    )
+    worker_rate_limit_fallback_seconds: int = Field(
+        default=60, ge=1, alias="WORKER_RATE_LIMIT_FALLBACK_SECONDS"
+    )
+    worker_stale_job_timeout_seconds: int = Field(
+        default=300, ge=1, alias="WORKER_STALE_JOB_TIMEOUT_SECONDS"
     )
     worker_id: str = Field(default="worker-local", alias="WORKER_ID")
 

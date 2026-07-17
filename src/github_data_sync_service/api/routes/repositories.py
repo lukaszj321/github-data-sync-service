@@ -5,16 +5,19 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Response, status
 
-from github_data_sync_service.api.dependencies import get_repository_service
+from github_data_sync_service.api.dependencies import get_repository_service, get_sync_job_service
 from github_data_sync_service.api.schemas.repositories import (
     RepositoryCreateRequest,
     RepositoryListResponse,
     RepositoryResponse,
 )
+from github_data_sync_service.api.schemas.sync_jobs import SyncJobCreateRequest, SyncJobResponse
+from github_data_sync_service.queue.service import SyncJobService
 from github_data_sync_service.repositories.service import RepositoryService
 
 router = APIRouter(prefix="/repositories", tags=["repositories"])
 RepositoryServiceDep = Annotated[RepositoryService, Depends(get_repository_service)]
+SyncJobServiceDep = Annotated[SyncJobService, Depends(get_sync_job_service)]
 
 
 @router.post("", response_model=RepositoryResponse)
@@ -49,3 +52,19 @@ def get_repository(
     service: RepositoryServiceDep,
 ) -> object:
     return service.get(repository_id)
+
+
+@router.post("/{repository_id}/sync", response_model=SyncJobResponse)
+def create_repository_sync_job(
+    repository_id: uuid.UUID,
+    payload: SyncJobCreateRequest,
+    response: Response,
+    service: SyncJobServiceDep,
+) -> object:
+    result = service.create_repository_sync(
+        repository_id=repository_id,
+        resource_type=payload.resource_type,
+    )
+    response.status_code = status.HTTP_202_ACCEPTED if result.created else status.HTTP_200_OK
+    response.headers["Location"] = f"/sync-jobs/{result.job.id}"
+    return result.job

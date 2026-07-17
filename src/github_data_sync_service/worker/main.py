@@ -4,12 +4,15 @@ import argparse
 import logging
 import signal
 import time
+from datetime import UTC, datetime
 
 from github_data_sync_service import __version__
 from github_data_sync_service.core.config import get_settings
 from github_data_sync_service.core.logging import configure_logging
 from github_data_sync_service.db.session import create_db_engine, create_session_factory
+from github_data_sync_service.github.client import GitHubClient
 from github_data_sync_service.queue.repository import SyncJobStore
+from github_data_sync_service.worker.processor import IssueSyncProcessor, recover_stale_jobs
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +29,15 @@ class Worker:
         configure_logging(settings.log_level)
         engine = create_db_engine(settings)
         factory = create_session_factory(engine)
+        github_client = GitHubClient(
+            base_url=settings.github_api_base_url,
+            user_agent=settings.github_user_agent,
+            api_version=settings.github_api_version,
+            token=settings.github_token_value,
+            connect_timeout_seconds=settings.github_connect_timeout_seconds,
+            read_timeout_seconds=settings.github_read_timeout_seconds,
+            max_attempts=settings.github_max_attempts,
+        )
         signal.signal(signal.SIGTERM, self.stop)
         signal.signal(signal.SIGINT, self.stop)
         logger.info("Worker started", extra={"worker_id": settings.worker_id})
@@ -34,18 +46,35 @@ class Worker:
                 session = factory()
                 try:
                     store = SyncJobStore(session)
+                    recover_stale_jobs(
+                        store=store,
+                        settings=settings,
+                        now=datetime.now(UTC),
+                    )
                     job = store.claim_available_job(worker_id=settings.worker_id)
                     if job is None:
                         time.sleep(settings.worker_poll_interval_seconds)
                         continue
-                    store.fail_job(job.id, f"Unsupported resource_type: {job.resource_type}")
                     logger.info(
-                        "Unsupported job failed",
-                        extra={"worker_id": settings.worker_id, "job_id": str(job.id)},
+                        "Claimed sync job",
+                        extra={
+                            "worker_id": settings.worker_id,
+                            "job_id": str(job.id),
+                            "repository_id": str(job.repository_id),
+                            "resource_type": job.resource_type,
+                            "attempt": job.attempt_count,
+                        },
                     )
+                    processor = IssueSyncProcessor(
+                        store=store,
+                        github_client=github_client,
+                        settings=settings,
+                    )
+                    processor.process(job)
                 finally:
                     session.close()
         finally:
+            github_client.close()
             engine.dispose()
             logger.info("Worker stopped", extra={"worker_id": settings.worker_id})
 

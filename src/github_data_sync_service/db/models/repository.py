@@ -21,6 +21,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from github_data_sync_service.db.base import Base
 
 if TYPE_CHECKING:
+    from github_data_sync_service.db.models.issue import Issue
     from github_data_sync_service.db.models.sync_job import SyncJob
 
 
@@ -57,3 +58,4 @@ class Repository(Base):
     )
 
     sync_jobs: Mapped[list[SyncJob]] = relationship(back_populates="repository")
+    issues: Mapped[list[Issue]] = relationship(back_populates="repository")

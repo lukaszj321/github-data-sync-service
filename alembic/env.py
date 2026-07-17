@@ -7,7 +7,7 @@ from sqlalchemy import engine_from_config, pool
 from alembic import context
 from github_data_sync_service.core.config import get_settings
 from github_data_sync_service.db.base import Base
-from github_data_sync_service.db.models import Repository, SyncJob  # noqa: F401
+from github_data_sync_service.db.models import Issue, Repository, SyncJob  # noqa: F401
 
 config = context.config
 

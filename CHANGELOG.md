@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.2.0] - Unreleased
+
+### Added
+
+- PostgreSQL-backed synchronization jobs for repository issues.
+- Paginated GitHub issues retrieval using `Link` response headers.
+- Idempotent issue storage and synchronization statistics.
+- API endpoints for creating and inspecting synchronization jobs.
+- Local API access to synchronized issues.
+- Rate-limit rescheduling and stale worker job recovery.
+
+### Changed
+
+- The worker now executes `issues` synchronization jobs.
+
 ## [0.1.0] - 2026-07-17
 
 ### Added

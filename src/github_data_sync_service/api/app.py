@@ -8,7 +8,9 @@ from fastapi import FastAPI
 from github_data_sync_service import __version__
 from github_data_sync_service.api.error_handlers import install_error_handlers
 from github_data_sync_service.api.routes.health import router as health_router
+from github_data_sync_service.api.routes.issues import router as issues_router
 from github_data_sync_service.api.routes.repositories import router as repositories_router
+from github_data_sync_service.api.routes.sync_jobs import router as sync_jobs_router
 from github_data_sync_service.core.config import get_settings
 from github_data_sync_service.core.logging import configure_logging
 from github_data_sync_service.db.session import create_db_engine, create_session_factory
@@ -32,6 +34,8 @@ def create_app() -> FastAPI:
     install_error_handlers(app)
     app.include_router(health_router)
     app.include_router(repositories_router)
+    app.include_router(sync_jobs_router)
+    app.include_router(issues_router)
     return app
 
 

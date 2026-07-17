@@ -60,7 +60,7 @@ def migrated_engine(test_database_url: str) -> Iterator[Engine]:
 @pytest.fixture
 def db_session(migrated_engine: Engine) -> Iterator[Session]:
     with migrated_engine.begin() as conn:
-        conn.execute(text("TRUNCATE sync_jobs, repositories RESTART IDENTITY CASCADE"))
+        conn.execute(text("TRUNCATE issues, sync_jobs, repositories RESTART IDENTITY CASCADE"))
     factory = sessionmaker(bind=migrated_engine, autoflush=False, expire_on_commit=False)
     session = factory()
     try:

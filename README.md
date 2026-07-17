@@ -2,55 +2,91 @@
 
 [![CI](https://github.com/lukaszj321/github-data-sync-service/actions/workflows/ci.yml/badge.svg)](https://github.com/lukaszj321/github-data-sync-service/actions/workflows/ci.yml)
 
-Aktualna wersja: `0.1.0`
+Aktualna wersja rozwojowa: `0.2.0`
+
+Najnowszy opublikowany release: `v0.1.0`
 
 Release: <https://github.com/lukaszj321/github-data-sync-service/releases/tag/v0.1.0>
 
-`github-data-sync-service` to fundament backendu do bezpiecznego rejestrowania publicznych repozytoriów GitHuba i późniejszej synchronizacji danych operacyjnych. Milestone 1 kończy się na walidacji repozytorium przez GitHub REST API oraz idempotentnym zapisie metadanych w PostgreSQL.
-
-To nie jest zwykły CRUD: aplikacja musi rozdzielać zewnętrzne I/O od transakcji bazy danych, obsługiwać rename albo transfer repozytorium przez stabilne `github_id`, respektować rate limiting GitHuba i przygotować kolejkę PostgreSQL dla kolejnych etapów.
+`github-data-sync-service` to backend do bezpiecznego rejestrowania publicznych repozytoriow GitHuba i synchronizacji ich danych operacyjnych do PostgreSQL. Milestone 2 dodaje kompletny vertical slice synchronizacji issues: klient API tworzy job, worker pobiera go z kolejki PostgreSQL, strona po stronie czyta GitHub Issues API, odrzuca pull requesty, idempotentnie zapisuje issues i aktualizuje statystyki joba.
 
 ## Wydania
 
-Informacje o zmianach znajdują się w [CHANGELOG.md](CHANGELOG.md).
+Informacje o zmianach znajduja sie w [CHANGELOG.md](CHANGELOG.md). `v0.1.0` pozostaje ostatnim opublikowanym release'em do czasu osobnego wydania `v0.2.0`.
 
-## Zakres Milestone 1
+## Zakres Milestone 2
 
-Gotowe są: FastAPI, synchroniczne SQLAlchemy 2, PostgreSQL, Alembic, klient `GET /repos/{owner}/{repo}`, endpointy repozytoriów, tabela `sync_jobs`, worker jako osobny proces, Docker Compose, testy i CI. Nie ma jeszcze synchronizacji issues, paginacji, ETag ani endpointu tworzenia zadań synchronizacji.
+Gotowe sa:
+
+- FastAPI, synchroniczne SQLAlchemy 2, PostgreSQL i Alembic.
+- Rejestracja publicznych repozytoriow przez `GET /repos/{owner}/{repo}`.
+- Kolejka `sync_jobs` oparta o `FOR UPDATE SKIP LOCKED`.
+- Endpoint tworzenia synchronizacji issues.
+- Worker wykonujacy joby `issues`.
+- Paginacja GitHub Issues API przez naglowek `Link` i `rel="next"`.
+- Filtrowanie pull requestow zwracanych przez endpoint issues.
+- Idempotentny upsert issues bez duplikatow.
+- Liczniki `fetched`, `skipped`, `created`, `updated`, `unchanged`, `error`.
+- Rate-limit rescheduling przez `available_at`.
+- Recovery starych jobow `running` po wygaslym heartbeat.
+
+Nie ma jeszcze ETag, trwalych checkpointow stron, retry endpointu, cancellation, synchronizacji pull requestow jako osobnego zasobu, komentarzy, labeli, commitow, releases ani workflow runs.
 
 ```mermaid
 flowchart LR
-    Client --> API[FastAPI]
-    API --> GitHub[GitHub REST API]
-    API --> DB[(PostgreSQL)]
-    Worker --> DB
-    DB --> Worker
+    Client[Client] --> API[FastAPI]
+    API --> Jobs[(sync_jobs)]
+    Jobs --> Worker[Worker]
+    Worker --> GitHub[GitHub Issues API]
+    Worker --> Issues[(issues)]
+    Worker --> Stats[job statistics]
+    Stats --> Jobs
 ```
 
 ## Architektura
 
-API i worker używają tego samego obrazu aplikacji. Endpoint `POST /repositories` najpierw odpytuje GitHuba, a dopiero potem otwiera krótką transakcję zapisu. Idempotencja opiera się na `UNIQUE (github_id)` i PostgreSQL `ON CONFLICT DO UPDATE`, a nie na samym wcześniejszym `SELECT`.
+API i worker uzywaja tego samego obrazu aplikacji, ale dzialaja jako osobne procesy. Endpoint `POST /repositories` wykonuje request do GitHuba przed zapisem repozytorium. Endpoint `POST /repositories/{repository_id}/sync` nie odpytuje GitHuba; tworzy lokalny job `pending` albo zwraca juz aktywny job dla tego repozytorium i zasobu.
 
-Worker ma fundament kolejki: cyklicznie pobiera pojedyncze dostępne zadanie przez `FOR UPDATE SKIP LOCKED`, natychmiast zwalnia blokadę po commicie i w tym etapie oznacza nieobsługiwane typy jako `failed`.
+Worker pobiera dostepne joby `pending` oraz `rate_limited` przez `FOR UPDATE SKIP LOCKED`, ustawia `running`, zwalnia transakcje i dopiero wtedy wykonuje request HTTP. Kazda strona GitHub API jest zapisywana w osobnej krotkiej transakcji: upsert issues, aktualizacja licznikow, `current_page`, request ID, rate limit remaining i heartbeat.
+
+Nie ma wznawiania od numeru strony. Ponowna proba joba zaczyna od pierwszej strony, bo numer strony GitHuba nie jest trwalym checkpointem.
 
 ## Struktura
 
 ```text
 src/github_data_sync_service/
   api/
+    routes/
+      issues.py
+      repositories.py
+      sync_jobs.py
+    schemas/
+      issues.py
+      repositories.py
+      sync_jobs.py
   core/
   db/
+    models/
+      issue.py
+      repository.py
+      sync_job.py
   github/
+    client.py
+    models.py
+    pagination.py
+  issues/
   queue/
   repositories/
   worker/
+    main.py
+    processor.py
 alembic/
 tests/
 ```
 
 ## Konfiguracja
 
-Konfiguracja pochodzi z `pydantic-settings` i zmiennych środowiskowych:
+Konfiguracja pochodzi z `pydantic-settings` i zmiennych srodowiskowych:
 
 ```text
 APP_ENV
@@ -63,15 +99,19 @@ GITHUB_USER_AGENT
 GITHUB_CONNECT_TIMEOUT_SECONDS
 GITHUB_READ_TIMEOUT_SECONDS
 GITHUB_MAX_ATTEMPTS
+GITHUB_ISSUES_PER_PAGE
+GITHUB_MAX_PAGES_PER_SYNC
 WORKER_POLL_INTERVAL_SECONDS
+WORKER_RATE_LIMIT_FALLBACK_SECONDS
+WORKER_STALE_JOB_TIMEOUT_SECONDS
 WORKER_ID
 ```
 
-`GITHUB_TOKEN` jest opcjonalny i może pochodzić wyłącznie ze środowiska. `.env.example` zawiera pustą wartość `GITHUB_TOKEN=`, a logi i wyjątki redagują sekrety oraz connection stringi z hasłem.
+`GITHUB_ISSUES_PER_PAGE` jest ograniczone do `1..100`, domyslnie `100`. `GITHUB_MAX_PAGES_PER_SYNC` chroni worker przed nieskonczona petla paginacji. `GITHUB_TOKEN` jest opcjonalny i moze pochodzic wylacznie ze srodowiska; logi i wyjatki nie ujawniaja tokenu ani naglowka Authorization.
 
 ## Uruchomienie
 
-Lokalne hasło w `compose.yaml` jest wyłącznie demonstracyjne.
+Lokalne haslo w `compose.yaml` jest wylacznie demonstracyjne.
 
 ```powershell
 docker compose up --build -d
@@ -83,8 +123,24 @@ Migracje:
 
 ```powershell
 alembic upgrade head
-alembic downgrade base
+alembic downgrade -1
 alembic upgrade head
+```
+
+## API
+
+Endpointy:
+
+```text
+POST /repositories
+GET /repositories?limit=50&offset=0
+GET /repositories/{repository_id}
+POST /repositories/{repository_id}/sync
+GET /sync-jobs?limit=50&offset=0
+GET /sync-jobs/{job_id}
+GET /repositories/{repository_id}/issues?limit=50&offset=0
+GET /health
+GET /ready
 ```
 
 Rejestracja repozytorium:
@@ -95,53 +151,101 @@ curl -X POST http://localhost:8000/repositories `
   -d "{\"owner\":\"fastapi\",\"name\":\"fastapi\"}"
 ```
 
-Przykładowa odpowiedź:
+Utworzenie joba synchronizacji issues:
+
+```powershell
+curl -i -X POST http://localhost:8000/repositories/{repository_id}/sync `
+  -H "Content-Type: application/json" `
+  -d "{\"resource_type\":\"issues\"}"
+```
+
+Nowy job zwraca `202 Accepted`; jezeli istnieje aktywny job `pending`, `running` albo `rate_limited`, API zwraca go z `200 OK`. Odpowiedz zawiera naglowek:
+
+```text
+Location: /sync-jobs/{job_id}
+```
+
+Przyklad joba:
 
 ```json
 {
   "id": "00000000-0000-0000-0000-000000000000",
-  "github_id": 160919119,
-  "owner": "fastapi",
-  "name": "fastapi",
-  "full_name": "fastapi/fastapi",
-  "html_url": "https://github.com/fastapi/fastapi",
-  "description": "...",
-  "default_branch": "master",
-  "is_fork": false,
-  "is_archived": false,
-  "github_created_at": "2018-12-08T15:00:42Z",
-  "github_updated_at": "2026-01-01T00:00:00Z",
-  "last_validated_at": "2026-01-01T00:00:00Z",
-  "created_at": "2026-01-01T00:00:00Z",
-  "updated_at": "2026-01-01T00:00:00Z"
+  "repository_id": "00000000-0000-0000-0000-000000000000",
+  "resource_type": "issues",
+  "status": "pending",
+  "attempt_count": 0,
+  "current_page": 0,
+  "fetched_count": 0,
+  "skipped_count": 0,
+  "created_count": 0,
+  "updated_count": 0,
+  "unchanged_count": 0,
+  "error_count": 0,
+  "last_error": null
 }
 ```
 
-## API i błędy
+Polling statusu:
 
-Endpointy:
+```powershell
+curl http://localhost:8000/sync-jobs/{job_id}
+```
+
+Listowanie lokalnych issues:
+
+```powershell
+curl "http://localhost:8000/repositories/{repository_id}/issues?state=open&limit=50&offset=0"
+```
+
+Endpoint issues czyta tylko PostgreSQL i nigdy nie wykonuje requestu do GitHuba. Brak lokalnych issues zwraca `200 OK` z pusta lista.
+
+## Liczniki joba
+
+- `fetched_count`: wszystkie elementy zwrocone przez GitHub Issues API, wlacznie z pull requestami.
+- `skipped_count`: elementy pominiete, bo zawieraly pole `pull_request`.
+- `created_count`: nowe lokalne issues.
+- `updated_count`: istniejace issues, ktorych pola domenowe realnie sie zmienily.
+- `unchanged_count`: istniejace issues identyczne z aktualna odpowiedzia GitHuba.
+- `error_count`: przerwane proby lub bledy joba; pozostaje kumulatywny.
+
+Dla poprawnie zakonczonej synchronizacji bez duplikatow po stronie GitHuba:
 
 ```text
-POST /repositories
-GET /repositories?limit=50&offset=0
-GET /repositories/{repository_id}
-GET /health
-GET /ready
+created_count + updated_count + unchanged_count = fetched_count - skipped_count
 ```
 
-Błędy mają stabilny format:
+## Paginacja i pull requesty
 
-```json
-{
-  "error": {
-    "code": "github_repository_not_found",
-    "message": "The requested public GitHub repository was not found.",
-    "request_id": "..."
-  }
-}
+Pierwszy request do GitHuba uzywa:
+
+```text
+state=all
+per_page=100
+sort=created
+direction=asc
 ```
 
-Rate limit GitHuba zwraca `429`, timeout `504`, tymczasowy błąd upstream `503`, błędny JSON albo struktura `502`, lokalny brak repozytorium `404`, a niedostępny PostgreSQL w `/ready` `503`.
+Kolejne strony sa pobierane wylacznie z `rel="next"` w naglowku `Link`. Worker nie konstruuje recznie numerow stron. `next_url` musi uzywac `https`, wskazywac ten sam host i port co `GITHUB_API_BASE_URL` oraz nie moze zawierac danych uwierzytelniajacych. Powtorzony `next_url`, petla paginacji albo przekroczenie `GITHUB_MAX_PAGES_PER_SYNC` koncza job statusem `failed`.
+
+GitHub Issues API moze zwracac pull requesty. Rekord jest pull requestem, jezeli zawiera klucz `pull_request`. Taki rekord zwieksza `fetched_count` i `skipped_count`, ale nie trafia do tabeli `issues` i nie jest bledem.
+
+## Upsert i brak prune
+
+Tabela `issues` ma unikalnosc `(repository_id, github_id)` oraz `(repository_id, number)`. Upsert uzywa PostgreSQL `ON CONFLICT DO UPDATE` i nie wykonuje realnego UPDATE, jezeli pola domenowe sa identyczne. Rozroznienie `created`, `updated` i `unchanged` odbywa sie bez race-prone preflight `SELECT`.
+
+Milestone 2 swiadomie nie usuwa lokalnych issues, ktorych nie zwrocila biezaca synchronizacja. Nie ma bezpiecznego prune bez pelnego, kompletnego snapshotu po stronie GitHub API; czesciowa synchronizacja, przesuniecia danych podczas paginacji i brak checkpointow moglyby prowadzic do utraty poprawnych danych.
+
+## Rate limit i recovery
+
+Dla rate-limited `403` oraz `429` worker nie spi dlugo. Job przechodzi w `rate_limited`, czysci lock metadata, zapisuje bezpieczny `last_error`, request ID, remaining i `available_at`:
+
+1. `now + Retry-After`, jezeli naglowek istnieje,
+2. `X-RateLimit-Reset`, jezeli remaining wynosi `0`,
+3. `now + WORKER_RATE_LIMIT_FALLBACK_SECONDS`, domyslnie 60 sekund.
+
+Po `available_at` ten sam job moze zostac ponownie pobrany i zaczyna od pierwszej strony. `attempt_count` oraz `error_count` sa kumulatywne.
+
+Worker odzyskuje stare joby `running`, ktorych `heartbeat_at` jest starszy niz `WORKER_STALE_JOB_TIMEOUT_SECONDS`. Recovery ustawia `pending`, `available_at = now`, czysci lock metadata i zwieksza `error_count`.
 
 ## Testy i quality gates
 
@@ -164,7 +268,7 @@ alembic upgrade head
 python -m pytest -m integration -W error
 ```
 
-Test live jest domyślnie pomijany:
+Test live jest domyslnie pomijany:
 
 ```powershell
 $env:RUN_LIVE_TESTS="1"
@@ -173,4 +277,4 @@ python -m pytest -m live
 
 ## Kolejne etapy
 
-Milestone 2 obejmie endpoint tworzenia zadania synchronizacji issues, paginację przez `Link`, filtrowanie pull requestów z endpointu issues, idempotentny upsert issues, statystyki zadania i obsługę rate limitu przez `available_at`.
+Kolejne milestone'y moga dodac osobna synchronizacje pull requestow, komentarze, labelki, checkpointing oparty o stabilniejsze mechanizmy, ETag, retry endpoint i metryki. Te funkcje nie sa czescia Milestone 2.

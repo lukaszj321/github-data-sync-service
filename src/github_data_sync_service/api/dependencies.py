@@ -9,6 +9,10 @@ from sqlalchemy.orm import Session
 from github_data_sync_service.core.config import Settings, get_settings
 from github_data_sync_service.db.session import create_db_engine, create_session_factory
 from github_data_sync_service.github.client import GitHubClient
+from github_data_sync_service.issues.repository import IssuesStore
+from github_data_sync_service.issues.service import IssueService
+from github_data_sync_service.queue.repository import SyncJobStore
+from github_data_sync_service.queue.service import SyncJobService
 from github_data_sync_service.repositories.repository import RepositoryStore
 from github_data_sync_service.repositories.service import RepositoryService
 
@@ -51,6 +55,14 @@ def get_repository_service(
     github_client: GitHubClientDep,
 ) -> RepositoryService:
     return RepositoryService(RepositoryStore(session), github_client)
+
+
+def get_sync_job_service(session: SessionDep) -> SyncJobService:
+    return SyncJobService(SyncJobStore(session), RepositoryStore(session))
+
+
+def get_issue_service(session: SessionDep) -> IssueService:
+    return IssueService(IssuesStore(session), RepositoryStore(session))
 
 
 def init_app_state(request: Request) -> None:
