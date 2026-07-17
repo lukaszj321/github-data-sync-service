@@ -378,6 +378,59 @@ def test_issue_sync_later_page_failure_does_not_complete(db_session: Session) ->
     assert db_session.query(Issue).count() == 1
 
 
+def test_issue_page_commit_failure_rolls_back_whole_page(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = RepositoryStore(db_session).upsert_from_github(github_repo(github_id=35)).repository
+    store = SyncJobStore(db_session)
+    job = store.create_or_get_active_job(repository_id=repo.id, resource_type="issues").job
+    claimed = store.claim_available_job(worker_id="worker-integration")
+    assert claimed is not None
+
+    first_page = github_page((github_issue(1),), request_id="page-1")
+    store.record_issue_page(
+        job_id=job.id,
+        repository_id=repo.id,
+        page_number=1,
+        page=first_page,
+    )
+    db_session.refresh(job)
+    assert db_session.query(Issue).count() == 1
+    assert job.current_page == 1
+    assert job.fetched_count == 1
+    assert job.created_count == 1
+
+    original_commit = db_session.commit
+
+    def fail_commit_once() -> None:
+        monkeypatch.setattr(db_session, "commit", original_commit)
+        raise RuntimeError("commit failed after upsert")
+
+    monkeypatch.setattr(db_session, "commit", fail_commit_once)
+    with pytest.raises(RuntimeError, match="commit failed after upsert"):
+        store.record_issue_page(
+            job_id=job.id,
+            repository_id=repo.id,
+            page_number=2,
+            page=github_page((github_issue(2),), request_id="page-2"),
+        )
+
+    db_session.expire_all()
+    failed_job = db_session.get(SyncJob, job.id)
+    assert failed_job is not None
+    assert db_session.query(Issue).count() == 1
+    assert [issue.number for issue in db_session.query(Issue).order_by(Issue.number)] == [1]
+    assert failed_job.current_page == 1
+    assert failed_job.fetched_count == 1
+    assert failed_job.created_count == 1
+
+    store.fail_job(job.id, "internal_error: RuntimeError")
+    db_session.refresh(failed_job)
+    assert failed_job.status == SyncJobStatus.failed.value
+    assert failed_job.locked_by is None
+
+
 def test_active_job_unique_constraint_returns_existing(db_session: Session) -> None:
     repo = RepositoryStore(db_session).upsert_from_github(github_repo(github_id=33)).repository
     store = SyncJobStore(db_session)

@@ -299,3 +299,13 @@ async def test_list_sync_jobs_and_issues_bound_limits() -> None:
 def test_settings_can_read_environment(monkeypatch: object) -> None:
     monkeypatch.setenv("WORKER_ID", "worker-test")  # type: ignore[attr-defined]
     assert Settings().worker_id == "worker-test"
+
+
+def test_default_user_agent_tracks_package_version() -> None:
+    settings = Settings()
+    assert settings.github_user_agent == "github-data-sync-service/0.2.0"
+
+
+def test_user_agent_override_still_works() -> None:
+    settings = Settings(GITHUB_USER_AGENT="custom-github-client")
+    assert settings.github_user_agent == "custom-github-client"

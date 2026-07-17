@@ -24,11 +24,14 @@ services:
       GITHUB_TOKEN: ""
       GITHUB_API_BASE_URL: https://api.github.com
       GITHUB_API_VERSION: "2022-11-28"
-      GITHUB_USER_AGENT: github-data-sync-service/0.1.0
       GITHUB_CONNECT_TIMEOUT_SECONDS: "5"
       GITHUB_READ_TIMEOUT_SECONDS: "15"
       GITHUB_MAX_ATTEMPTS: "3"
+      GITHUB_ISSUES_PER_PAGE: "100"
+      GITHUB_MAX_PAGES_PER_SYNC: "1000"
       WORKER_POLL_INTERVAL_SECONDS: "5"
+      WORKER_RATE_LIMIT_FALLBACK_SECONDS: "60"
+      WORKER_STALE_JOB_TIMEOUT_SECONDS: "300"
       WORKER_ID: worker-compose
     command: alembic upgrade head
     depends_on:
@@ -44,11 +47,14 @@ services:
       GITHUB_TOKEN: ""
       GITHUB_API_BASE_URL: https://api.github.com
       GITHUB_API_VERSION: "2022-11-28"
-      GITHUB_USER_AGENT: github-data-sync-service/0.1.0
       GITHUB_CONNECT_TIMEOUT_SECONDS: "5"
       GITHUB_READ_TIMEOUT_SECONDS: "15"
       GITHUB_MAX_ATTEMPTS: "3"
+      GITHUB_ISSUES_PER_PAGE: "100"
+      GITHUB_MAX_PAGES_PER_SYNC: "1000"
       WORKER_POLL_INTERVAL_SECONDS: "5"
+      WORKER_RATE_LIMIT_FALLBACK_SECONDS: "60"
+      WORKER_STALE_JOB_TIMEOUT_SECONDS: "300"
       WORKER_ID: worker-compose
     command: uvicorn github_data_sync_service.api.app:app --host 0.0.0.0 --port 8000
     ports:
@@ -66,13 +72,17 @@ services:
       GITHUB_TOKEN: ""
       GITHUB_API_BASE_URL: https://api.github.com
       GITHUB_API_VERSION: "2022-11-28"
-      GITHUB_USER_AGENT: github-data-sync-service/0.1.0
       GITHUB_CONNECT_TIMEOUT_SECONDS: "5"
       GITHUB_READ_TIMEOUT_SECONDS: "15"
       GITHUB_MAX_ATTEMPTS: "3"
+      GITHUB_ISSUES_PER_PAGE: "100"
+      GITHUB_MAX_PAGES_PER_SYNC: "1000"
       WORKER_POLL_INTERVAL_SECONDS: "5"
+      WORKER_RATE_LIMIT_FALLBACK_SECONDS: "60"
+      WORKER_STALE_JOB_TIMEOUT_SECONDS: "300"
       WORKER_ID: worker-compose
     command: github-data-sync-worker
+    restart: unless-stopped
     depends_on:
       migrate:
         condition: service_completed_successfully

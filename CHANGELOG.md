@@ -14,6 +14,9 @@
 ### Changed
 
 - The worker now executes `issues` synchronization jobs.
+- Removed stale hard-coded application versions from Docker Compose and environment examples.
+- Added per-job exception isolation so unexpected failures do not terminate the worker process.
+- Added full Docker end-to-end synchronization validation.
 
 ## [0.1.0] - 2026-07-17
 

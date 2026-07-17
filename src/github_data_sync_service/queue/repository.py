@@ -31,6 +31,9 @@ class SyncJobStore:
     def __init__(self, session: Session) -> None:
         self._session = session
 
+    def rollback(self) -> None:
+        self._session.rollback()
+
     def create_or_get_active_job(
         self,
         *,
@@ -152,27 +155,30 @@ class SyncJobStore:
         page: GitHubIssuePage,
         now: datetime | None = None,
     ) -> IssueUpsertCounts:
-        current_time = now or datetime.now(UTC)
-        counts = IssuesStore(self._session).upsert_page(
-            repository_id=repository_id,
-            issues=page.issues,
-            synced_at=current_time,
-        )
-        job = self._session.get(SyncJob, job_id)
-        if job is None:
+        try:
+            current_time = now or datetime.now(UTC)
+            counts = IssuesStore(self._session).upsert_page(
+                repository_id=repository_id,
+                issues=page.issues,
+                synced_at=current_time,
+            )
+            job = self._session.get(SyncJob, job_id)
+            if job is None:
+                raise ValueError("Sync job no longer exists")
+            job.current_page = page_number
+            job.fetched_count += page.fetched_count
+            job.skipped_count += page.skipped_pull_request_count
+            job.created_count += counts.created
+            job.updated_count += counts.updated
+            job.unchanged_count += counts.unchanged
+            job.github_request_id = page.github_request_id
+            job.rate_limit_remaining = page.rate_limit.remaining
+            job.heartbeat_at = current_time
+            self._session.commit()
+            return counts
+        except Exception:
             self._session.rollback()
-            raise ValueError("Sync job no longer exists")
-        job.current_page = page_number
-        job.fetched_count += page.fetched_count
-        job.skipped_count += page.skipped_pull_request_count
-        job.created_count += counts.created
-        job.updated_count += counts.updated
-        job.unchanged_count += counts.unchanged
-        job.github_request_id = page.github_request_id
-        job.rate_limit_remaining = page.rate_limit.remaining
-        job.heartbeat_at = current_time
-        self._session.commit()
-        return counts
+            raise
 
     def complete_job(self, job_id: uuid.UUID, *, now: datetime | None = None) -> None:
         current_time = now or datetime.now(UTC)

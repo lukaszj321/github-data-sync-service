@@ -49,6 +49,8 @@ API i worker uzywaja tego samego obrazu aplikacji, ale dzialaja jako osobne proc
 
 Worker pobiera dostepne joby `pending` oraz `rate_limited` przez `FOR UPDATE SKIP LOCKED`, ustawia `running`, zwalnia transakcje i dopiero wtedy wykonuje request HTTP. Kazda strona GitHub API jest zapisywana w osobnej krotkiej transakcji: upsert issues, aktualizacja licznikow, `current_page`, request ID, rate limit remaining i heartbeat.
 
+Worker izoluje nieoczekiwane bledy pojedynczego joba. Jezeli processor albo zapis strony rzuci blad spoza kontrolowanych bledow GitHuba, worker robi rollback aktywnej sesji, probuje oznaczyc job jako `failed` z bezpiecznym `last_error` w stylu `internal_error: RuntimeError`, czysci lock metadata i przechodzi do kolejnej iteracji. Jezeli baza jest chwilowo niedostepna i nie da sie oznaczyc joba jako `failed`, worker loguje blad, stosuje poll backoff i pozostaje uruchomiony.
+
 Nie ma wznawiania od numeru strony. Ponowna proba joba zaczyna od pierwszej strony, bo numer strony GitHuba nie jest trwalym checkpointem.
 
 ## Struktura
@@ -117,6 +119,35 @@ Lokalne haslo w `compose.yaml` jest wylacznie demonstracyjne.
 docker compose up --build -d
 curl http://localhost:8000/health
 curl http://localhost:8000/ready
+```
+
+Reczny end-to-end smoke test synchronizacji issues:
+
+```powershell
+docker compose down --volumes --remove-orphans
+docker compose up --build -d
+
+$repo = Invoke-RestMethod -Method Post `
+  -Uri http://localhost:8000/repositories `
+  -ContentType "application/json" `
+  -Body '{"owner":"lukaszj321","name":"github-data-sync-service"}'
+
+$job = Invoke-RestMethod -Method Post `
+  -Uri "http://localhost:8000/repositories/$($repo.id)/sync" `
+  -ContentType "application/json" `
+  -Body '{"resource_type":"issues"}'
+
+for ($i = 0; $i -lt 60; $i++) {
+  $current = Invoke-RestMethod -Uri "http://localhost:8000/sync-jobs/$($job.id)"
+  if ($current.status -in @("completed", "failed", "rate_limited")) { break }
+  Start-Sleep -Seconds 2
+}
+
+Invoke-RestMethod -Uri "http://localhost:8000/repositories/$($repo.id)/issues"
+docker compose logs --no-color --tail 300 worker
+docker compose exec worker github-data-sync-worker --version
+docker compose exec worker id
+docker compose down --volumes --remove-orphans
 ```
 
 Migracje:
@@ -245,7 +276,7 @@ Dla rate-limited `403` oraz `429` worker nie spi dlugo. Job przechodzi w `rate_l
 
 Po `available_at` ten sam job moze zostac ponownie pobrany i zaczyna od pierwszej strony. `attempt_count` oraz `error_count` sa kumulatywne.
 
-Worker odzyskuje stare joby `running`, ktorych `heartbeat_at` jest starszy niz `WORKER_STALE_JOB_TIMEOUT_SECONDS`. Recovery ustawia `pending`, `available_at = now`, czysci lock metadata i zwieksza `error_count`.
+Worker odzyskuje stare joby `running`, ktorych `heartbeat_at` jest starszy niz `WORKER_STALE_JOB_TIMEOUT_SECONDS`. Recovery ustawia `pending`, `available_at = now`, czysci lock metadata i zwieksza `error_count`. To mechanizm awaryjny dla przerwanych procesow albo niedostepnej bazy, a nie podstawowa sciezka obslugi wyjatkow pojedynczego joba.
 
 ## Testy i quality gates
 
