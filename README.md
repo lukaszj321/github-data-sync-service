@@ -1,8 +1,18 @@
 # github-data-sync-service
 
+[![CI](https://github.com/lukaszj321/github-data-sync-service/actions/workflows/ci.yml/badge.svg)](https://github.com/lukaszj321/github-data-sync-service/actions/workflows/ci.yml)
+
+Aktualna wersja: `0.1.0`
+
+Release: <https://github.com/lukaszj321/github-data-sync-service/releases/tag/v0.1.0>
+
 `github-data-sync-service` to fundament backendu do bezpiecznego rejestrowania publicznych repozytoriów GitHuba i późniejszej synchronizacji danych operacyjnych. Milestone 1 kończy się na walidacji repozytorium przez GitHub REST API oraz idempotentnym zapisie metadanych w PostgreSQL.
 
 To nie jest zwykły CRUD: aplikacja musi rozdzielać zewnętrzne I/O od transakcji bazy danych, obsługiwać rename albo transfer repozytorium przez stabilne `github_id`, respektować rate limiting GitHuba i przygotować kolejkę PostgreSQL dla kolejnych etapów.
+
+## Wydania
+
+Informacje o zmianach znajdują się w [CHANGELOG.md](CHANGELOG.md).
 
 ## Zakres Milestone 1
 

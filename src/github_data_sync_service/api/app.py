@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from github_data_sync_service import __version__
 from github_data_sync_service.api.error_handlers import install_error_handlers
 from github_data_sync_service.api.routes.health import router as health_router
 from github_data_sync_service.api.routes.repositories import router as repositories_router
@@ -27,7 +28,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="github-data-sync-service", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="github-data-sync-service", version=__version__, lifespan=lifespan)
     install_error_handlers(app)
     app.include_router(health_router)
     app.include_router(repositories_router)

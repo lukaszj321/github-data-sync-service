@@ -5,6 +5,8 @@ from functools import lru_cache
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from github_data_sync_service import __version__
+
 
 class Settings(BaseSettings):
     app_env: str = Field(default="local", alias="APP_ENV")
@@ -17,7 +19,7 @@ class Settings(BaseSettings):
     github_api_base_url: str = Field(default="https://api.github.com", alias="GITHUB_API_BASE_URL")
     github_api_version: str = Field(default="2022-11-28", alias="GITHUB_API_VERSION")
     github_user_agent: str = Field(
-        default="github-data-sync-service/0.1.0", alias="GITHUB_USER_AGENT"
+        default=f"github-data-sync-service/{__version__}", alias="GITHUB_USER_AGENT"
     )
     github_connect_timeout_seconds: float = Field(default=5, alias="GITHUB_CONNECT_TIMEOUT_SECONDS")
     github_read_timeout_seconds: float = Field(default=15, alias="GITHUB_READ_TIMEOUT_SECONDS")
