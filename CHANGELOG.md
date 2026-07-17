@@ -1,6 +1,8 @@
 # Changelog
 
-## [0.2.0] - Unreleased
+## [Unreleased]
+
+## [0.2.0] - 2026-07-17
 
 ### Added
 
@@ -17,6 +19,7 @@
 - Removed stale hard-coded application versions from Docker Compose and environment examples.
 - Added per-job exception isolation so unexpected failures do not terminate the worker process.
 - Added full Docker end-to-end synchronization validation.
+- Rebuilt README as the main Polish project portal for the stable `v0.2.0` release.
 
 ## [0.1.0] - 2026-07-17
 
