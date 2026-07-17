@@ -58,6 +58,8 @@ def job(resource_type: str = "issues") -> SimpleNamespace:
         repository_id=uuid.uuid4(),
         repository=SimpleNamespace(owner="owner", name="repo"),
         resource_type=resource_type,
+        sync_mode="full",
+        since_at=None,
         current_page=0,
         attempt_count=1,
     )
@@ -75,7 +77,9 @@ class FakeClient:
         *,
         per_page: int,
         max_pages: int,
+        since: datetime | None = None,
     ) -> Iterator[GitHubIssuePage]:
+        self.since = since
         if self.error is not None:
             raise self.error
         yield from self.pages
@@ -129,6 +133,22 @@ def test_processor_handles_issues_job() -> None:
     assert store.recorded_pages == [1, 2]
     assert store.completed == sync_job.id
     assert store.failed is None
+
+
+def test_processor_passes_since_for_incremental_job() -> None:
+    store = FakeStore()
+    since = datetime(2026, 1, 1, tzinfo=UTC)
+    client = FakeClient([])
+    sync_job = job()
+    sync_job.sync_mode = "incremental"
+    sync_job.since_at = since
+    IssueSyncProcessor(
+        store=store,  # type: ignore[arg-type]
+        github_client=client,
+        settings=settings(),
+        now=lambda: since,
+    ).process(sync_job)  # type: ignore[arg-type]
+    assert client.since == since
 
 
 def test_processor_fails_unsupported_resource_type() -> None:

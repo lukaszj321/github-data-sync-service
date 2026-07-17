@@ -88,6 +88,11 @@ def fake_job(repository_id: uuid.UUID) -> SimpleNamespace:
         id=uuid.uuid4(),
         repository_id=repository_id,
         resource_type="issues",
+        sync_mode="full",
+        cursor_before=None,
+        since_at=None,
+        cursor_after=None,
+        sync_window_started_at=None,
         status="pending",
         attempt_count=0,
         available_at=now,
@@ -140,7 +145,9 @@ class FakeSyncJobService:
         self.job = fake_job(repository_id)
         self.created = created
 
-    def create_repository_sync(self, *, repository_id: uuid.UUID, resource_type: str) -> object:
+    def create_repository_sync(
+        self, *, repository_id: uuid.UUID, resource_type: str, mode: str = "incremental"
+    ) -> object:
         return SimpleNamespace(job=self.job, created=self.created)
 
     def list(
@@ -151,11 +158,24 @@ class FakeSyncJobService:
         repository_id: uuid.UUID | None,
         status: str | None,
         resource_type: str | None,
+        mode: str | None = None,
     ) -> list[object]:
         return [self.job]
 
     def get(self, job_id: uuid.UUID) -> object:
         return self.job
+
+    def get_repository_sync_state(self, repository_id: uuid.UUID) -> object:
+        return SimpleNamespace(
+            repository_id=repository_id,
+            resource_type="issues",
+            initialized=False,
+            cursor_at=None,
+            last_successful_job_id=None,
+            last_sync_mode=None,
+            last_started_at=None,
+            last_completed_at=None,
+        )
 
 
 class FakeIssueService:
@@ -257,6 +277,42 @@ async def test_create_repository_sync_job_sets_location() -> None:
         )
     assert response.status_code == 202
     assert response.headers["Location"] == f"/sync-jobs/{sync_service.job.id}"
+    assert response.json()["sync_mode"] == "full"
+
+
+@pytest.mark.anyio
+async def test_create_repository_sync_job_accepts_explicit_mode() -> None:
+    repository_service = FakeService()
+    sync_service = FakeSyncJobService(repository_service.repository.id, created=True)
+    app = make_app_with_sync(
+        repository_service,
+        sync_service,
+        FakeIssueService(repository_service.repository.id),
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            f"/repositories/{repository_service.repository.id}/sync",
+            json={"resource_type": "issues", "mode": "full"},
+        )
+    assert response.status_code == 202
+
+
+@pytest.mark.anyio
+async def test_create_repository_sync_job_rejects_invalid_mode() -> None:
+    repository_service = FakeService()
+    app = make_app_with_sync(
+        repository_service,
+        FakeSyncJobService(repository_service.repository.id),
+        FakeIssueService(repository_service.repository.id),
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            f"/repositories/{repository_service.repository.id}/sync",
+            json={"resource_type": "issues", "mode": "bad"},
+        )
+    assert response.status_code == 422
 
 
 @pytest.mark.anyio
@@ -274,6 +330,22 @@ async def test_create_repository_sync_job_existing_returns_200() -> None:
             json={"resource_type": "issues"},
         )
     assert response.status_code == 200
+
+
+@pytest.mark.anyio
+async def test_get_repository_sync_state_uninitialized() -> None:
+    repository_service = FakeService()
+    app = make_app_with_sync(
+        repository_service,
+        FakeSyncJobService(repository_service.repository.id),
+        FakeIssueService(repository_service.repository.id),
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(f"/repositories/{repository_service.repository.id}/sync-state")
+    assert response.status_code == 200
+    assert response.json()["initialized"] is False
+    assert response.json()["cursor_at"] is None
 
 
 @pytest.mark.anyio
@@ -303,7 +375,7 @@ def test_settings_can_read_environment(monkeypatch: object) -> None:
 
 def test_default_user_agent_tracks_package_version() -> None:
     settings = Settings()
-    assert settings.github_user_agent == "github-data-sync-service/0.2.0"
+    assert settings.github_user_agent == "github-data-sync-service/0.3.0"
 
 
 def test_user_agent_override_still_works() -> None:

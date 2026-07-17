@@ -2,32 +2,31 @@
 
 [![CI](https://github.com/lukaszj321/github-data-sync-service/actions/workflows/ci.yml/badge.svg)](https://github.com/lukaszj321/github-data-sync-service/actions/workflows/ci.yml)
 
-Aktualna wersja: `0.2.0`
+Aktualna wersja: `0.3.0`
 
 Wydania: <https://github.com/lukaszj321/github-data-sync-service/releases>
 
-`github-data-sync-service` to backend do rejestrowania publicznych repozytoriów GitHuba i synchronizacji wybranych danych do PostgreSQL. API tworzy lokalne zadania synchronizacji, a osobny worker pobiera issues stronami z GitHub REST API, filtruje pull requesty, idempotentnie zapisuje issues oraz obsługuje rate limiting, recovery i błędy pojedynczego joba.
+`github-data-sync-service` to backend do rejestrowania publicznych repozytoriów GitHuba i synchronizacji wybranych danych do PostgreSQL. API tworzy lokalne zadania synchronizacji, a osobny worker pobiera issues stronami z GitHub REST API, filtruje pull requesty, idempotentnie zapisuje issues oraz obsługuje rate limiting, recovery, błędy pojedynczego joba i trwały kursor synchronizacji.
 
-Wersja `0.2.0` dostarcza stabilny vertical slice dla synchronizacji issues. Nie jest to kompletna platforma analityczna GitHuba: projekt świadomie ogranicza zakres do publicznych repozytoriów, kolejki jobów, workera, lokalnego odczytu issues i walidowanego przepływu release.
+Wersja `0.3.0` dodaje pełny i przyrostowy tryb synchronizacji issues. Pierwszy przebieg nadal wykonuje bootstrap full, a następne przebiegi mogą używać parametru `since` z bezpiecznym oknem nakładania.
 
 ## Zacznij tutaj
 
-Projekt rozwiązuje problem bezpiecznego przeniesienia synchronizacji z requestu HTTP do kontrolowanej kolejki PostgreSQL. Klient rejestruje repozytorium i tworzy job, worker wykonuje synchronizację poza requestem API, a aplikacja zapisuje wynik w lokalnej bazie.
+Projekt rozwiązuje problem bezpiecznego przeniesienia synchronizacji z requestu HTTP do kontrolowanej kolejki PostgreSQL. Klient rejestruje repozytorium i tworzy job, worker wykonuje synchronizację poza requestem API, a aplikacja zapisuje wynik i stan kursora w lokalnej bazie.
 
-Zakres wersji `0.2.0` obejmuje synchronizację issues, paginację, filtrowanie pull requestów, idempotentny upsert, liczniki joba, rate limiting, recovery porzuconych jobów i izolację nieoczekiwanych błędów pojedynczego joba.
-
-Szybkie uruchomienie znajduje się w sekcji [Uruchomienie](#uruchomienie), architektura w sekcji [Architektura](#architektura), opis API w sekcji [API](#api), testy w sekcji [Testy i quality gates](#testy-i-quality-gates), a świadome ograniczenia w sekcjach [Status projektu](#status-projektu) i [Ograniczenia](#ograniczenia).
+Zakres wersji `0.3.0` obejmuje synchronizację issues, paginację po `Link`, filtrowanie pull requestów, idempotentny upsert, liczniki joba, rate-limit rescheduling, stale recovery, izolację błędów pojedynczego joba, tryby `full` i `incremental`, trwały `ResourceSyncState` oraz endpoint odczytu stanu synchronizacji.
 
 Kolejność czytania:
 
-1. Status projektu i zakres wersji `0.2.0`.
+1. Status projektu i zakres wersji `0.3.0`.
 2. Architektura oraz przepływ synchronizacji.
-3. Uruchomienie przez Docker Compose.
-4. Rejestracja repozytorium.
-5. Utworzenie zadania synchronizacji.
-6. Sprawdzanie statusu joba.
-7. Odczyt zsynchronizowanych issues.
-8. Testy, ograniczenia i informacje o wydaniach.
+3. Tryby synchronizacji i trwały kursor.
+4. Uruchomienie przez Docker Compose.
+5. Rejestracja repozytorium.
+6. Utworzenie zadania synchronizacji.
+7. Sprawdzanie statusu joba i stanu synchronizacji.
+8. Odczyt zsynchronizowanych issues.
+9. Testy, ograniczenia i informacje o wydaniach.
 
 ---
 
@@ -35,21 +34,30 @@ Kolejność czytania:
 
 - [Zacznij tutaj](#zacznij-tutaj)
 - [Status projektu](#status-projektu)
-  - [Gotowe w wersji 0.2.0](#gotowe-w-wersji-020)
+  - [Gotowe w wersji 0.3.0](#gotowe-w-wersji-030)
   - [Świadome ograniczenia](#świadome-ograniczenia)
-  - [Poza zakresem wersji 0.2.0](#poza-zakresem-wersji-020)
+  - [Poza zakresem wersji 0.3.0](#poza-zakresem-wersji-030)
 - [Architektura](#architektura)
   - [Komponenty](#komponenty)
   - [Przepływ synchronizacji](#przepływ-synchronizacji)
   - [Granice transakcji](#granice-transakcji)
   - [Obsługa awarii](#obsługa-awarii)
-- [Zakres wersji 0.2.0](#zakres-wersji-020)
+- [Tryby synchronizacji](#tryby-synchronizacji)
+  - [Bootstrap full](#bootstrap-full)
+  - [Incremental](#incremental)
+  - [Explicit full](#explicit-full)
+- [Trwały kursor](#trwały-kursor)
+  - [Okno nakładania](#okno-nakładania)
+  - [Stan synchronizacji](#stan-synchronizacji)
+  - [Bezpieczne przesuwanie kursora](#bezpieczne-przesuwanie-kursora)
+- [Zakres wersji 0.3.0](#zakres-wersji-030)
 - [Struktura projektu](#struktura-projektu)
 - [API](#api)
   - [Rejestracja repozytorium](#rejestracja-repozytorium)
   - [Listowanie i odczyt repozytoriów](#listowanie-i-odczyt-repozytoriów)
   - [Tworzenie zadania synchronizacji](#tworzenie-zadania-synchronizacji)
   - [Sprawdzanie statusu zadania](#sprawdzanie-statusu-zadania)
+  - [Odczyt stanu synchronizacji](#odczyt-stanu-synchronizacji)
   - [Odczyt issues](#odczyt-issues)
   - [Health i readiness](#health-i-readiness)
 - [Konfiguracja](#konfiguracja)
@@ -68,57 +76,52 @@ Kolejność czytania:
 
 ## Status projektu
 
-### Gotowe w wersji 0.2.0
+### Gotowe w wersji 0.3.0
 
 - Rejestracja publicznych repozytoriów.
 - Walidacja repozytorium przez GitHub REST API.
-- PostgreSQL job queue.
+- PostgreSQL job queue z `FOR UPDATE SKIP LOCKED`.
 - Osobny proces workera.
 - Synchronizacja issues.
+- Tryby `full` i `incremental`.
+- Bootstrap full przy pierwszym żądaniu incremental bez kursora.
+- Trwały stan `resource_sync_states` dla repozytorium i zasobu.
 - Paginacja przez nagłówek `Link` i `rel="next"`.
-- Walidacja adresów następnej strony.
+- Sortowanie issues po `updated` rosnąco.
+- Parametr GitHub `since` dla synchronizacji przyrostowej.
+- Konfigurowane overlap window.
 - Filtrowanie pull requestów zwracanych przez GitHub Issues API.
 - Idempotentny upsert issues.
 - Statystyki joba.
-- Zapisywanie każdej strony w krótkiej transakcji.
 - Rate-limit rescheduling.
 - Stale job recovery.
-- Izolacja błędów pojedynczego joba.
+- Endpoint `GET /repositories/{repository_id}/sync-state`.
 - Docker Compose.
 - Migracje Alembic.
-- Testy jednostkowe.
-- Testy integracyjne PostgreSQL.
-- Opcjonalne testy live.
+- Testy jednostkowe, integracyjne PostgreSQL i opcjonalne live.
 - GitHub Actions.
 
 ### Świadome ograniczenia
 
 - Obsługiwane są wyłącznie publiczne repozytoria.
-- Nie ma ETag.
-- Nie ma incremental sync.
-- Nie ma trwałych checkpointów.
-- Nie ma wznawiania od numeru strony.
+- Nie ma ETag ani conditional requests.
+- Nie ma persistent page-level resume.
+- Numer strony i `next_url` nie są trwałymi checkpointami.
+- Nie ma wznawiania od środka częściowo przetworzonego joba.
 - Nie ma automatycznego usuwania lokalnych issues nieobecnych w późniejszej odpowiedzi GitHuba.
 - Nie ma synchronizacji innych zasobów GitHuba.
 
-### Poza zakresem wersji 0.2.0
+### Poza zakresem wersji 0.3.0
 
-Te obszary nie są zaimplementowane w `0.2.0`:
+Te obszary nie są zaimplementowane w `0.3.0`:
 
 - Pull requesty jako osobny zasób.
-- Commity.
-- Releases.
-- Workflow runs.
-- Komentarze.
-- Labels.
-- Milestones.
-- OAuth.
-- Frontend.
-- Redis.
-- Celery.
-- Kafka.
-- Kubernetes.
-- Wdrożenie chmurowe.
+- Commity, releases, workflow runs, komentarze, labels, milestones i assignees.
+- Webhooki i harmonogram cykliczny.
+- Endpoint cancellation i ręczny retry.
+- GraphQL, OAuth i prywatne repozytoria wymagające nowego modelu autoryzacji.
+- Frontend, Redis, Celery, Kafka, Kubernetes i wdrożenie chmurowe.
+- LLM.
 
 [↑ Powrót do spisu treści](#spis-treści)
 
@@ -129,10 +132,11 @@ Te obszary nie są zaimplementowane w `0.2.0`:
 ### Komponenty
 
 - FastAPI odpowiada za endpointy HTTP, walidację requestów, mapowanie odpowiedzi i cykl życia zależności.
-- PostgreSQL przechowuje repozytoria, joby synchronizacji i zsynchronizowane issues.
+- PostgreSQL przechowuje repozytoria, joby synchronizacji, zsynchronizowane issues i trwały stan zasobu.
 - `sync_jobs` jest kolejką pracy opartą o statusy, `available_at`, lock metadata i `FOR UPDATE SKIP LOCKED`.
-- Worker jest osobnym procesem, który przejmuje dostępne joby i wykonuje synchronizację poza requestem HTTP.
-- `GitHubClient` obsługuje requesty do GitHub REST API, retry błędów tymczasowych, klasyfikację rate limitów i bezpieczne diagnostyki.
+- `resource_sync_states` przechowuje kursor dla pary `repository_id` oraz `resource_type`.
+- Worker przejmuje dostępne joby i wykonuje synchronizację poza requestem HTTP.
+- `GitHubClient` obsługuje requesty do GitHub REST API, retry błędów tymczasowych, klasyfikację rate limitów, `since` i bezpieczne diagnostyki.
 - Issues store zapisuje issues idempotentnie i rozróżnia rekordy utworzone, zaktualizowane oraz niezmienione.
 - Alembic zarządza schematem bazy danych.
 - Docker Compose uruchamia PostgreSQL, jednorazowe migracje, API i workera.
@@ -142,37 +146,45 @@ Te obszary nie są zaimplementowane w `0.2.0`:
 
 ```mermaid
 flowchart LR
-    Client[Klient] -->|POST sync| API[FastAPI]
+    Client[Client] -->|POST /sync mode| API[FastAPI]
     API -->|pending job| Jobs[(sync_jobs)]
+    API -->|read cursor| State[(resource_sync_states)]
     Jobs -->|FOR UPDATE SKIP LOCKED| Worker[Worker]
-    Worker -->|GET issues pages| GitHub[GitHub Issues API]
-    GitHub -->|issues + pull requests| Worker
+    Worker -->|GET issues sort=updated since optional| GitHub[GitHub Issues API]
+    GitHub -->|issues plus pull requests| Worker
     Worker -->|filtered issue upsert| Issues[(issues)]
-    Worker -->|status + counters| Jobs
+    Worker -->|status and counters| Jobs
+    Worker -->|atomic cursor advance| State
 ```
 
 Kroki przepływu:
 
 1. Klient rejestruje repozytorium albo korzysta z istniejącego `repository_id`.
 2. Klient tworzy zadanie przez `POST /repositories/{repository_id}/sync`.
-3. API zapisuje lokalny job `pending` w PostgreSQL albo zwraca aktywny job dla tego samego repozytorium i zasobu.
-4. Worker claimuje dostępny job przez krótką transakcję z `FOR UPDATE SKIP LOCKED`.
-5. Worker pobiera strony z GitHub Issues API.
-6. Rekordy z polem `pull_request` są liczone jako pominięte i nie trafiają do tabeli `issues`.
-7. Issues są zapisywane idempotentnie, a statystyki joba są aktualizowane.
-8. Job kończy jako `completed`, `failed` albo `rate_limited`.
+3. API sprawdza `ResourceSyncState`, rozstrzyga faktyczny `sync_mode`, wylicza `cursor_before` i `since_at`, a następnie zapisuje lokalny job `pending`.
+4. Jeżeli istnieje aktywny job dla tego repozytorium i zasobu, API zwraca go bez zmiany trybu.
+5. Worker claimuje dostępny job przez krótką transakcję z `FOR UPDATE SKIP LOCKED`.
+6. Worker ustawia `sync_window_started_at` tylko przy pierwszym claimie joba.
+7. Worker pobiera strony z GitHub Issues API, używając `since` tylko dla faktycznego trybu incremental.
+8. Rekordy z polem `pull_request` są liczone jako pominięte i nie trafiają do tabeli `issues`.
+9. Issues są zapisywane idempotentnie, a statystyki joba są aktualizowane.
+10. Po pełnym sukcesie job i `ResourceSyncState` są aktualizowane w jednej transakcji.
 
 ### Granice transakcji
 
-Endpoint tworzący job nie wykonuje requestu do GitHuba. Claim joba jest krótką transakcją, która kończy się przed komunikacją HTTP, więc worker nie trzyma blokady bazy podczas requestów do GitHuba.
+Endpoint tworzący job nie wykonuje requestu do GitHuba. Odczyt stanu i utworzenie joba są kontrolowane przez przepływ transakcyjny, a ochronę przed duplikatem aktywnego joba zapewnia partial unique index.
+
+Claim joba jest krótką transakcją, która kończy się przed komunikacją HTTP, więc worker nie trzyma blokady bazy podczas requestów do GitHuba.
 
 Każda poprawnie sparsowana strona jest zapisywana w osobnej krótkiej transakcji. Upsert issues i aktualizacja liczników danej strony są atomowe: jeżeli commit strony się nie powiedzie, zapisy issues z tej strony są wycofywane razem z licznikami. Błąd późniejszej strony nie usuwa wcześniejszych zatwierdzonych stron.
 
+Completion jest osobną transakcją: job może zostać oznaczony jako `completed` tylko razem z poprawnym przesunięciem trwałego stanu zasobu.
+
 ### Obsługa awarii
 
-Kontrolowane błędy GitHuba są klasyfikowane przez klienta. Błędy tymczasowe mogą zostać ponowione zgodnie z konfiguracją. Rate limit kończy iterację statusem `rate_limited` i ustawia `available_at`. Błędy trwałe GitHuba kończą job statusem `failed`.
+Kontrolowane błędy GitHuba są klasyfikowane przez klienta. Błędy tymczasowe mogą zostać ponowione zgodnie z konfiguracją. Rate limit kończy iterację statusem `rate_limited`, czyści lock metadata, zachowuje `sync_mode`, `cursor_before`, `since_at` oraz `sync_window_started_at`, ustawia `available_at` i nie przesuwa kursora.
 
-Nieoczekiwany błąd aplikacji albo bazy w trakcie pojedynczego joba jest izolowany. Worker wykonuje rollback sesji, próbuje oznaczyć job jako `failed`, zapisuje bezpieczne `last_error` w formacie podobnym do `internal_error: RuntimeError`, czyści lock metadata i przechodzi do kolejnej iteracji. Jeżeli baza nie pozwala oznaczyć joba jako `failed`, worker loguje bezpieczny typ błędu, stosuje poll backoff i pozostaje uruchomiony. Stale recovery jest zabezpieczeniem awaryjnym dla przerwanych procesów albo niedostępnej bazy, a nie podstawową ścieżką obsługi wyjątków pojedynczego joba.
+Nieoczekiwany błąd aplikacji albo bazy w trakcie pojedynczego joba jest izolowany. Worker wykonuje rollback sesji, próbuje oznaczyć job jako `failed`, zapisuje bezpieczne `last_error`, czyści lock metadata i przechodzi do kolejnej iteracji. Stale recovery jest zabezpieczeniem awaryjnym dla przerwanych procesów albo niedostępnej bazy, a nie podstawową ścieżką obsługi wyjątków pojedynczego joba.
 
 Źródła implementacji:
 
@@ -188,13 +200,132 @@ Nieoczekiwany błąd aplikacji albo bazy w trakcie pojedynczego joba jest izolow
 
 ---
 
-## Zakres wersji 0.2.0
+## Tryby synchronizacji
+
+### Bootstrap full
+
+Domyślny request używa `mode = incremental`, ale jeżeli dla repozytorium nie istnieje jeszcze udany `ResourceSyncState.cursor_at`, API tworzy faktyczny job `sync_mode = full`.
+
+W takim jobie:
+
+- `cursor_before = null`
+- `since_at = null`
+- GitHub request nie zawiera `since`
+- response pokazuje faktyczny `sync_mode = full`
+
+To zachowanie pozwala klientowi zawsze wysyłać ten sam domyślny request i bezpiecznie przejść od pustej bazy do późniejszych synchronizacji przyrostowych.
+
+### Incremental
+
+Gdy istnieje `cursor_at`, request `mode = incremental` tworzy job z:
+
+- `sync_mode = incremental`
+- `cursor_before = state.cursor_at`
+- `since_at = cursor_before - ISSUES_SYNC_OVERLAP_SECONDS`
+
+Worker wysyła do GitHuba:
+
+```text
+state=all
+per_page=100
+sort=updated
+direction=asc
+since=2026-07-17T11:59:00Z
+```
+
+Następne strony są pobierane wyłącznie przez zwalidowany `Link rel="next"`. Aplikacja nie dokleja ponownie `since` do `next_url`, nie zapisuje `next_url` jako kursora i nie traktuje numeru strony jako checkpointu.
+
+### Explicit full
+
+Request z `mode = full` wymusza pełną synchronizację:
+
+```json
+{
+  "resource_type": "issues",
+  "mode": "full"
+}
+```
+
+Jeżeli istnieje poprzedni kursor, `cursor_before` może go zawierać diagnostycznie, ale `since_at` musi pozostać `null`, a request do GitHuba nie zawiera `since`. Po pełnym sukcesie stan kursora przesuwa się do nowego `sync_window_started_at`.
+
+[↑ Powrót do spisu treści](#spis-treści)
+
+---
+
+## Trwały kursor
+
+Kursor nie jest numerem strony, `next_url`, ETagiem ani maksymalnym `github_updated_at` znalezionym w odpowiedzi. Bezpiecznym kandydatem na nowy kursor jest czas rozpoczęcia okna synchronizacji, czyli `sync_window_started_at`, zapisany przed pierwszym requestem HTTP danego joba.
+
+Znaczenie nowych pól joba:
+
+- `sync_mode`: faktyczny tryb wykonania joba, `full` albo `incremental`.
+- `cursor_before`: `cursor_at` odczytany ze stanu synchronizacji podczas tworzenia joba.
+- `since_at`: `cursor_before` cofnięty o overlap; `null` dla full.
+- `sync_window_started_at`: czas rozpoczęcia okna synchronizacji, ustawiany tylko raz przy pierwszym claimie joba.
+- `cursor_after`: ustawiany wyłącznie po pełnym sukcesie, równy `sync_window_started_at`.
+
+### Okno nakładania
+
+`ISSUES_SYNC_OVERLAP_SECONDS` domyślnie wynosi `60`. Dla kursora:
+
+```text
+cursor_at = 2026-07-17T12:00:00Z
+overlap = 60 sekund
+since_at = 2026-07-17T11:59:00Z
+```
+
+Duplikaty z overlap window są oczekiwane. Idempotentny upsert rozpozna je jako `created`, `updated` albo `unchanged`. Jeżeli overlap wynosi `0`, `since_at` jest równe `cursor_before`.
+
+Timestamp wysyłany jako `since` jest timezone-aware, normalizowany do UTC, obcinany do sekund i serializowany z końcowym `Z`, na przykład `2026-07-17T11:59:00Z`. Naiwny `datetime` bez strefy jest odrzucany w kontrolowanej funkcji klienta.
+
+### Stan synchronizacji
+
+`resource_sync_states` przechowuje stan dla pary repozytorium i zasób:
+
+- `id`
+- `repository_id`
+- `resource_type`
+- `cursor_at`
+- `last_successful_job_id`
+- `last_sync_mode`
+- `last_started_at`
+- `last_completed_at`
+- `created_at`
+- `updated_at`
+
+Stan nie powstaje przy samym utworzeniu joba. `initialized = true` dopiero po udanym completion.
+
+### Bezpieczne przesuwanie kursora
+
+Kursor przesuwa się tylko po pełnym, poprawnym zakończeniu wszystkich stron danego joba. Completion w jednej transakcji blokuje job, tworzy albo aktualizuje `ResourceSyncState`, ustawia `cursor_at`, `last_successful_job_id`, `last_sync_mode`, `last_started_at`, `last_completed_at`, `job.cursor_after`, `status = completed`, `finished_at` i czyści lock metadata.
+
+Kursor nie przesuwa się po:
+
+- `failed`
+- `rate_limited`
+- `cancelled`
+- przerwaniu procesu
+- stale recovery
+- błędzie zapisu późniejszej strony
+- błędzie transakcji completion
+
+Jeżeli starszy odzyskany job zakończy się po nowszym udanym jobie, nie może cofnąć `state.cursor_at`. Job zachowuje własne `cursor_after` diagnostycznie, ale trwały high-watermark pozostaje nowszy.
+
+ETag nie jest jeszcze użyty do pomijania całej paginowanej kolekcji, ponieważ obecny przepływ nie wysyła conditional headers. Nieoczekiwane `304` w tym trybie jest traktowane jako błąd odpowiedzi, nie jako sukces synchronizacji.
+
+[↑ Powrót do spisu treści](#spis-treści)
+
+---
+
+## Zakres wersji 0.3.0
 
 Wersja `0.1.0` dostarczyła rejestrację repozytoriów, fundament kolejki PostgreSQL, migracje, podstawową strukturę API i walidacje jakości.
 
-Wersja `0.2.0` dodaje wykonanie jobów `issues` przez workera, lokalną tabelę `issues`, endpointy jobów i issues, paginację po `rel="next"`, filtrowanie pull requestów, liczniki synchronizacji, rate-limit rescheduling, stale recovery oraz izolację błędów pojedynczego joba.
+Wersja `0.2.0` dodała wykonanie jobów `issues` przez workera, lokalną tabelę `issues`, endpointy jobów i issues, paginację po `rel="next"`, filtrowanie pull requestów, liczniki synchronizacji, rate-limit rescheduling, stale recovery oraz izolację błędów pojedynczego joba.
 
-To podsumowanie nie zastępuje pełnej historii zmian. Szczegóły są w [CHANGELOG.md](CHANGELOG.md), a opis wydania w [RELEASE_NOTES_v0.2.0.md](RELEASE_NOTES_v0.2.0.md).
+Wersja `0.3.0` dodaje trwały stan synchronizacji zasobu, tryby `full` i `incremental`, parametr GitHub `since`, overlap window, atomowe przesuwanie kursora i endpoint `sync-state`.
+
+To podsumowanie nie zastępuje pełnej historii zmian. Szczegóły są w [CHANGELOG.md](CHANGELOG.md). Opisy stabilnych wydań pozostają dostępne w [RELEASE_NOTES_v0.2.0.md](RELEASE_NOTES_v0.2.0.md) i [RELEASE_NOTES_v0.1.0.md](RELEASE_NOTES_v0.1.0.md).
 
 [↑ Powrót do spisu treści](#spis-treści)
 
@@ -227,7 +358,7 @@ Najważniejsze obszary:
 
 - `api/` zawiera aplikację FastAPI, routing, schematy odpowiedzi i zależności.
 - `core/` zawiera konfigurację, logowanie i błędy aplikacyjne.
-- `db/` zawiera sesje SQLAlchemy i modele tabel.
+- `db/` zawiera sesje SQLAlchemy i modele tabel, w tym `ResourceSyncState`.
 - `github/` zawiera klienta GitHuba, modele odpowiedzi i obsługę paginacji.
 - `issues/` zawiera idempotentny zapis i odczyt issues.
 - `queue/` zawiera operacje na `sync_jobs` oraz serwis tworzenia jobów.
@@ -249,6 +380,7 @@ POST /repositories
 GET /repositories
 GET /repositories/{repository_id}
 POST /repositories/{repository_id}/sync
+GET /repositories/{repository_id}/sync-state
 GET /sync-jobs
 GET /sync-jobs/{job_id}
 GET /repositories/{repository_id}/issues
@@ -269,28 +401,6 @@ Request:
 }
 ```
 
-Przykładowa odpowiedź:
-
-```json
-{
-  "id": "00000000-0000-0000-0000-000000000000",
-  "github_id": 1303669823,
-  "owner": "lukaszj321",
-  "name": "github-data-sync-service",
-  "full_name": "lukaszj321/github-data-sync-service",
-  "html_url": "https://github.com/lukaszj321/github-data-sync-service",
-  "description": "Backend service for validating and storing GitHub repository metadata.",
-  "default_branch": "main",
-  "is_fork": false,
-  "is_archived": false,
-  "github_created_at": "2026-07-17T06:54:27Z",
-  "github_updated_at": "2026-07-17T18:34:12Z",
-  "last_validated_at": "2026-07-17T19:20:00Z",
-  "created_at": "2026-07-17T19:20:00Z",
-  "updated_at": "2026-07-17T19:20:00Z"
-}
-```
-
 Status `201 Created` oznacza nową lokalną rejestrację. Status `200 OK` oznacza, że repozytorium było już zapisane lokalnie i zostało odświeżone.
 
 ### Listowanie i odczyt repozytoriów
@@ -303,39 +413,54 @@ Status `201 Created` oznacza nową lokalną rejestrację. Status `200 OK` oznacz
 
 `POST /repositories/{repository_id}/sync` tworzy job synchronizacji issues.
 
-Body:
+Domyślny incremental request:
 
 ```json
 {
-  "resource_type": "issues"
+  "resource_type": "issues",
+  "mode": "incremental"
 }
 ```
 
-Nowy job zwraca `202 Accepted`. Jeżeli istnieje aktywny job `pending`, `running` albo `rate_limited` dla tego repozytorium i zasobu, API zwraca go z `200 OK`. Nagłówek `Location` wskazuje `/sync-jobs/{job_id}`.
+Wymuszony full request:
+
+```json
+{
+  "resource_type": "issues",
+  "mode": "full"
+}
+```
+
+Nowy job zwraca `202 Accepted`. Jeżeli istnieje aktywny job `pending`, `running` albo `rate_limited` dla tego repozytorium i zasobu, API zwraca go z `200 OK`, nie zmienia jego trybu i zachowuje nagłówek `Location`.
 
 Endpoint nie wykonuje requestu do GitHuba. Zapisuje wyłącznie lokalny job dla workera.
 
 ### Sprawdzanie statusu zadania
 
-`GET /sync-jobs` listuje joby. Obsługiwane są parametry `limit`, `offset`, `repository_id`, `status` i `resource_type`.
+`GET /sync-jobs` listuje joby. Obsługiwane są parametry `limit`, `offset`, `repository_id`, `status`, `resource_type` i `mode`.
 
 `GET /sync-jobs/{job_id}` zwraca pojedynczy job.
 
-Przykładowa odpowiedź:
+Przykładowe pola odpowiedzi:
 
 ```json
 {
   "id": "00000000-0000-0000-0000-000000000000",
   "repository_id": "00000000-0000-0000-0000-000000000000",
   "resource_type": "issues",
+  "sync_mode": "incremental",
+  "cursor_before": "2026-07-17T12:00:00Z",
+  "since_at": "2026-07-17T11:59:00Z",
+  "cursor_after": "2026-07-17T12:10:00Z",
+  "sync_window_started_at": "2026-07-17T12:10:00Z",
   "status": "completed",
   "attempt_count": 1,
-  "available_at": "2026-07-17T19:20:00Z",
+  "available_at": "2026-07-17T12:09:59Z",
   "locked_at": null,
   "locked_by": null,
   "heartbeat_at": null,
-  "started_at": "2026-07-17T19:20:04Z",
-  "finished_at": "2026-07-17T19:20:09Z",
+  "started_at": "2026-07-17T12:10:00Z",
+  "finished_at": "2026-07-17T12:10:03Z",
   "current_page": 1,
   "fetched_count": 0,
   "skipped_count": 0,
@@ -346,10 +471,46 @@ Przykładowa odpowiedź:
   "last_error": null,
   "github_request_id": "request-id",
   "rate_limit_remaining": 50,
-  "created_at": "2026-07-17T19:20:00Z",
-  "updated_at": "2026-07-17T19:20:09Z"
+  "created_at": "2026-07-17T12:09:59Z",
+  "updated_at": "2026-07-17T12:10:03Z"
 }
 ```
+
+### Odczyt stanu synchronizacji
+
+`GET /repositories/{repository_id}/sync-state` zwraca stan synchronizacji issues bez requestu do GitHuba.
+
+Przed pierwszym sukcesem:
+
+```json
+{
+  "repository_id": "00000000-0000-0000-0000-000000000000",
+  "resource_type": "issues",
+  "initialized": false,
+  "cursor_at": null,
+  "last_successful_job_id": null,
+  "last_sync_mode": null,
+  "last_started_at": null,
+  "last_completed_at": null
+}
+```
+
+Po sukcesie:
+
+```json
+{
+  "repository_id": "00000000-0000-0000-0000-000000000000",
+  "resource_type": "issues",
+  "initialized": true,
+  "cursor_at": "2026-07-17T12:10:00Z",
+  "last_successful_job_id": "00000000-0000-0000-0000-000000000000",
+  "last_sync_mode": "incremental",
+  "last_started_at": "2026-07-17T12:10:00Z",
+  "last_completed_at": "2026-07-17T12:10:03Z"
+}
+```
+
+Nieistniejące repozytorium zwraca `404`.
 
 ### Odczyt issues
 
@@ -385,12 +546,13 @@ Konfiguracja pochodzi z `pydantic-settings`, zmiennych środowiskowych i opcjona
 | `GITHUB_TOKEN` | brak | Opcjonalny token zwiększający limity GitHub API; pochodzi wyłącznie ze środowiska. |
 | `GITHUB_API_BASE_URL` | `https://api.github.com` | Bazowy URL GitHub REST API. |
 | `GITHUB_API_VERSION` | `2022-11-28` | Wersja API wysyłana w nagłówkach requestu. |
-| `GITHUB_USER_AGENT` | `github-data-sync-service/0.2.0` | User-Agent klienta; domyślnie wykorzystuje aktualną wersję pakietu. |
+| `GITHUB_USER_AGENT` | `github-data-sync-service/0.3.0` | User-Agent klienta; domyślnie wykorzystuje aktualną wersję pakietu. |
 | `GITHUB_CONNECT_TIMEOUT_SECONDS` | `5` | Timeout zestawiania połączenia. |
 | `GITHUB_READ_TIMEOUT_SECONDS` | `15` | Timeout odczytu odpowiedzi. |
 | `GITHUB_MAX_ATTEMPTS` | `3` | Maksymalna liczba prób dla błędów tymczasowych; minimum `1`. |
 | `GITHUB_ISSUES_PER_PAGE` | `100` | Liczba elementów na stronie issues; zakres `1..100`. |
 | `GITHUB_MAX_PAGES_PER_SYNC` | `1000` | Bezpiecznik przed nieskończoną paginacją; minimum `1`. |
+| `ISSUES_SYNC_OVERLAP_SECONDS` | `60` | Cofnięcie `since_at` względem `cursor_before`; zakres `0..86400`. |
 | `WORKER_POLL_INTERVAL_SECONDS` | `5` | Odstęp workera, gdy nie ma dostępnego joba albo potrzebny jest backoff. |
 | `WORKER_RATE_LIMIT_FALLBACK_SECONDS` | `60` | Fallback rate limitu, gdy odpowiedź nie ma jednoznacznych nagłówków. |
 | `WORKER_STALE_JOB_TIMEOUT_SECONDS` | `300` | Czas po którym porzucony `running` job może zostać odzyskany. |
@@ -451,7 +613,7 @@ W Compose migracje wykonuje osobna usługa `migrate`, od której zależą `api` 
 
 ## Przykład end-to-end
 
-Poniższy przykład uruchamia stack, rejestruje publiczne repozytorium, tworzy dwa joby issues i sprawdza idempotencję bez używania prywatnego tokenu.
+Poniższy przykład uruchamia stack, rejestruje publiczne repozytorium, tworzy bootstrap full, potem incremental i wymuszony full.
 
 ```powershell
 docker compose down --volumes --remove-orphans
@@ -467,25 +629,23 @@ $repo = Invoke-RestMethod -Method Post `
 
 $repositoryId = $repo.id
 
-$job = Invoke-RestMethod -Method Post `
+$firstJob = Invoke-RestMethod -Method Post `
   -Uri "http://localhost:8000/repositories/$repositoryId/sync" `
   -ContentType "application/json" `
-  -Body '{"resource_type":"issues"}'
-
-$jobId = $job.id
+  -Body '{"resource_type":"issues","mode":"incremental"}'
 
 for ($i = 0; $i -lt 60; $i++) {
-  $current = Invoke-RestMethod -Uri "http://localhost:8000/sync-jobs/$jobId"
-  if ($current.status -in @("completed", "failed", "rate_limited")) { break }
+  $firstCurrent = Invoke-RestMethod -Uri "http://localhost:8000/sync-jobs/$($firstJob.id)"
+  if ($firstCurrent.status -in @("completed", "failed", "rate_limited")) { break }
   Start-Sleep -Seconds 2
 }
 
-$issues = Invoke-RestMethod -Uri "http://localhost:8000/repositories/$repositoryId/issues?limit=100"
+$stateAfterBootstrap = Invoke-RestMethod -Uri "http://localhost:8000/repositories/$repositoryId/sync-state"
 
 $secondJob = Invoke-RestMethod -Method Post `
   -Uri "http://localhost:8000/repositories/$repositoryId/sync" `
   -ContentType "application/json" `
-  -Body '{"resource_type":"issues"}'
+  -Body '{"resource_type":"issues","mode":"incremental"}'
 
 for ($i = 0; $i -lt 60; $i++) {
   $secondCurrent = Invoke-RestMethod -Uri "http://localhost:8000/sync-jobs/$($secondJob.id)"
@@ -493,15 +653,25 @@ for ($i = 0; $i -lt 60; $i++) {
   Start-Sleep -Seconds 2
 }
 
-$issuesAfterSecondRun = Invoke-RestMethod -Uri "http://localhost:8000/repositories/$repositoryId/issues?limit=100"
+$fullJob = Invoke-RestMethod -Method Post `
+  -Uri "http://localhost:8000/repositories/$repositoryId/sync" `
+  -ContentType "application/json" `
+  -Body '{"resource_type":"issues","mode":"full"}'
 
+$issues = Invoke-RestMethod -Uri "http://localhost:8000/repositories/$repositoryId/issues?limit=100"
+$syncState = Invoke-RestMethod -Uri "http://localhost:8000/repositories/$repositoryId/sync-state"
+
+$firstCurrent.sync_mode
+$secondCurrent.sync_mode
+$secondCurrent.cursor_before
+$secondCurrent.since_at
+$syncState.initialized
 $issues.items.Count
-$issuesAfterSecondRun.items.Count
 
 docker compose down --volumes --remove-orphans
 ```
 
-Jeżeli repozytorium nie ma zwykłych issues, poprawnym wynikiem jest `completed` z pustą listą. Ważne jest to, że job został odebrany przez workera, zakończył się kontrolowanym statusem, a drugi przebieg nie utworzył duplikatów.
+Repozytorium może mieć zero zwykłych issues. Pusty wynik jest poprawny, jeżeli worker odebrał job, job zakończył się kontrolowanym statusem, a cursor state został zaktualizowany po sukcesie.
 
 [↑ Powrót do spisu treści](#spis-treści)
 
@@ -513,7 +683,7 @@ Jeżeli repozytorium nie ma zwykłych issues, poprawnym wynikiem jest `completed
 - `skipped_count`: elementy pominięte, bo zawierały pole `pull_request`.
 - `created_count`: nowe lokalne issues.
 - `updated_count`: istniejące issues, których pola domenowe realnie się zmieniły.
-- `unchanged_count`: istniejące issues identyczne z aktualną odpowiedzią GitHuba.
+- `unchanged_count`: istniejące issues identyczne z aktualną odpowiedzią GitHuba, w tym rekordy ponownie pobrane przez overlap.
 - `error_count`: przerwane próby, błędy joba i odzyskane stale locki; licznik jest kumulatywny.
 
 Dla poprawnie zakończonej synchronizacji bez duplikatów po stronie GitHuba:
@@ -533,11 +703,11 @@ Pierwszy request issues używa:
 ```text
 state=all
 per_page=100
-sort=created
+sort=updated
 direction=asc
 ```
 
-Kolejne strony są pobierane wyłącznie z `rel="next"` w nagłówku `Link`. Worker nie konstruuje ręcznie numerów stron. `next_url` musi używać `https`, wskazywać ten sam host i port co `GITHUB_API_BASE_URL` oraz nie może zawierać danych uwierzytelniających. Powtórzony `next_url`, pętla paginacji albo przekroczenie `GITHUB_MAX_PAGES_PER_SYNC` kończą job statusem `failed`.
+Dla incremental dodawany jest `since`. Kolejne strony są pobierane wyłącznie z `rel="next"` w nagłówku `Link`. Worker nie konstruuje ręcznie numerów stron. `next_url` musi używać `https`, wskazywać ten sam host i port co `GITHUB_API_BASE_URL` oraz nie może zawierać danych uwierzytelniających. Powtórzony `next_url`, pętla paginacji albo przekroczenie `GITHUB_MAX_PAGES_PER_SYNC` kończą job statusem `failed`.
 
 Dla rate-limited `403` oraz `429` worker nie śpi długo. Job przechodzi w `rate_limited`, czyści lock metadata, zapisuje bezpieczny `last_error`, request ID, remaining i `available_at`:
 
@@ -545,7 +715,7 @@ Dla rate-limited `403` oraz `429` worker nie śpi długo. Job przechodzi w `rate
 2. `X-RateLimit-Reset`, jeżeli remaining wynosi `0`.
 3. `now + WORKER_RATE_LIMIT_FALLBACK_SECONDS`, domyślnie 60 sekund.
 
-Po `available_at` ten sam job może zostać ponownie pobrany i zaczyna od pierwszej strony. `attempt_count` oraz `error_count` są kumulatywne.
+Po `available_at` ten sam job może zostać ponownie pobrany i zaczyna od pierwszej strony. Zachowuje `sync_mode`, `cursor_before`, `since_at` i `sync_window_started_at`; aktualizuje `started_at` dla nowej próby; zwiększa `attempt_count` oraz `error_count`.
 
 [↑ Powrót do spisu treści](#spis-treści)
 
@@ -555,7 +725,7 @@ Po `available_at` ten sam job może zostać ponownie pobrany i zaczyna od pierws
 
 Worker odzyskuje stare joby `running`, których `heartbeat_at` jest starszy niż `WORKER_STALE_JOB_TIMEOUT_SECONDS`. Recovery ustawia `pending`, `available_at = now`, czyści lock metadata i zwiększa `error_count`.
 
-Recovery jest mechanizmem awaryjnym dla przerwanych procesów albo niedostępnej bazy. Standardowa obsługa nieoczekiwanego błędu pojedynczego joba odbywa się wcześniej: rollback, bezpieczne `last_error`, próba oznaczenia joba jako `failed` i kontynuacja pracy workera.
+Recovery nie przesuwa `ResourceSyncState.cursor_at`, nie czyści `sync_window_started_at`, nie zmienia `sync_mode`, `cursor_before` ani `since_at`. Retry zaczyna od pierwszej strony i używa pierwotnego zakresu synchronizacji.
 
 [↑ Powrót do spisu treści](#spis-treści)
 
@@ -569,7 +739,9 @@ Recovery jest mechanizmem awaryjnym dla przerwanych procesów albo niedostępnej
 | Sprawdzić, czy API działa | [Health i readiness](#health-i-readiness) |
 | Zarejestrować publiczne repozytorium | [Rejestracja repozytorium](#rejestracja-repozytorium) |
 | Utworzyć synchronizację issues | [Tworzenie zadania synchronizacji](#tworzenie-zadania-synchronizacji) |
+| Zrozumieć full i incremental | [Tryby synchronizacji](#tryby-synchronizacji) |
 | Sprawdzić status joba | [Sprawdzanie statusu zadania](#sprawdzanie-statusu-zadania) |
+| Sprawdzić durable cursor | [Odczyt stanu synchronizacji](#odczyt-stanu-synchronizacji) |
 | Odczytać lokalne issues | [Odczyt issues](#odczyt-issues) |
 | Zrozumieć liczniki joba | [Semantyka liczników](#semantyka-liczników) |
 | Sprawdzić zachowanie przy rate limit | [Rate limiting i ponowne próby](#rate-limiting-i-ponowne-próby) |
@@ -626,8 +798,9 @@ GitHub Actions wykonuje te same główne bramki jakości, build pakietu, instala
 
 - Projekt działa z publicznymi repozytoriami GitHuba.
 - Issues są synchronizowane jako zasób z GitHub Issues API; pull requesty są filtrowane, ale nie są synchronizowane jako osobny zasób.
-- Nie ma ETag, incremental sync ani trwałego checkpointu strony.
-- Ponowna próba joba zaczyna od pierwszej strony i polega na idempotentnych upsertach.
+- Nie ma ETag ani conditional request support.
+- Incremental sync nie gwarantuje trwałego snapshotu całej paginowanej kolekcji.
+- Numer strony i `next_url` nie są checkpointami.
 - Lokalny prune issues nie jest wykonywany, bo częściowa synchronizacja nie jest bezpiecznym kompletnym snapshotem.
 - Nie ma synchronizacji commits, releases, workflow runs, komentarzy, labels ani milestones.
 - Nie ma OAuth, frontendu, Redis, Celery, Kafka, Kubernetes ani wdrożenia chmurowego.
@@ -648,6 +821,7 @@ Historia:
 
 - `v0.1.0`: fundament rejestracji repozytoriów, kolejki, migracji, Docker Compose i CI.
 - `v0.2.0`: wykonanie synchronizacji issues przez workera, lokalne issues, API jobów, obsługa rate limitów, recovery i izolacja błędów joba.
+- `0.3.0`: incremental issue synchronization with durable cursors. Nie utworzono jeszcze taga ani release notes dla `v0.3.0`.
 
 [↑ Powrót do spisu treści](#spis-treści)
 
@@ -663,6 +837,7 @@ Historia:
 - Kolejka jobów: [`src/github_data_sync_service/queue/`](src/github_data_sync_service/queue/)
 - Issues store: [`src/github_data_sync_service/issues/`](src/github_data_sync_service/issues/)
 - Modele bazy: [`src/github_data_sync_service/db/models/`](src/github_data_sync_service/db/models/)
+- Model stanu zasobu: [`src/github_data_sync_service/db/models/resource_sync_state.py`](src/github_data_sync_service/db/models/resource_sync_state.py)
 - Migracje: [`alembic/versions/`](alembic/versions/)
 - Testy jednostkowe: [`tests/unit/`](tests/unit/)
 - Testy integracyjne: [`tests/integration/`](tests/integration/)

@@ -4,7 +4,7 @@ import logging
 import random
 import time
 from collections.abc import Callable, Iterator, Mapping
-from datetime import datetime
+from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import Any, TypeVar
 
@@ -93,6 +93,7 @@ class GitHubClient:
         *,
         per_page: int,
         max_pages: int,
+        since: datetime | None = None,
     ) -> Iterator[GitHubIssuePage]:
         bounded_per_page = min(max(per_page, 1), 100)
         page_count = 0
@@ -100,7 +101,13 @@ class GitHubClient:
         seen_next_urls: set[str] = set()
         while True:
             page_count += 1
-            page = self._get_issues_page(owner, repo, per_page=bounded_per_page, next_url=next_url)
+            page = self._get_issues_page(
+                owner,
+                repo,
+                per_page=bounded_per_page,
+                next_url=next_url,
+                since=since,
+            )
             yield page
             if page.next_url is None:
                 return
@@ -132,16 +139,20 @@ class GitHubClient:
         *,
         per_page: int,
         next_url: str | None,
+        since: datetime | None,
     ) -> GitHubIssuePage:
         if next_url is None:
+            params: dict[str, str | int] = {
+                "state": "all",
+                "per_page": per_page,
+                "sort": "updated",
+                "direction": "asc",
+            }
+            if since is not None:
+                params["since"] = format_github_since(since)
             return self._request_with_retries(
                 f"/repos/{owner}/{repo}/issues",
-                params={
-                    "state": "all",
-                    "per_page": per_page,
-                    "sort": "created",
-                    "direction": "asc",
-                },
+                params=params,
                 response_handler=self._handle_issues_response,
                 retry_rate_limits=False,
             )
@@ -393,6 +404,13 @@ class GitHubClient:
 def _parse_datetime(value: str) -> datetime:
     normalized = value.replace("Z", "+00:00")
     return datetime.fromisoformat(normalized)
+
+
+def format_github_since(value: datetime) -> str:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("since must be timezone-aware")
+    normalized = value.astimezone(UTC).replace(microsecond=0)
+    return normalized.isoformat().replace("+00:00", "Z")
 
 
 def _parse_optional_int(value: str | None) -> int | None:

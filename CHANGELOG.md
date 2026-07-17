@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+## [0.3.0] - Unreleased
+
+### Added
+
+- Durable synchronization state for repository resources.
+- Full and incremental issue synchronization modes.
+- Incremental GitHub issue retrieval using a persisted high-watermark cursor.
+- Configurable overlap window for safe boundary reprocessing.
+- API access to repository synchronization state.
+
+### Changed
+
+- Issue synchronization is ordered by GitHub update time.
+- Successful jobs atomically advance the resource synchronization cursor.
+- Subsequent issue jobs default to incremental synchronization after a successful bootstrap.
+
+### Limitations
+
+- No ETag or conditional request support yet.
+- No automatic pruning of locally stored issues.
+- No persistent page-level resume.
+- No synchronization of additional GitHub resources.
+
 ## [0.2.0] - 2026-07-17
 
 ### Added

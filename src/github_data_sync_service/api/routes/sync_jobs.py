@@ -21,6 +21,7 @@ def list_sync_jobs(
     repository_id: uuid.UUID | None = None,
     status: str | None = None,
     resource_type: str | None = None,
+    mode: str | None = None,
 ) -> SyncJobListResponse:
     bounded_limit = min(max(limit, 1), 100)
     bounded_offset = max(offset, 0)
@@ -32,6 +33,7 @@ def list_sync_jobs(
             repository_id=repository_id,
             status=status,
             resource_type=resource_type,
+            mode=mode,
         )
     ]
     return SyncJobListResponse(items=items, limit=bounded_limit, offset=bounded_offset)

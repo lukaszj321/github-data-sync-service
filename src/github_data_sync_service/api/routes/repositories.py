@@ -10,6 +10,7 @@ from github_data_sync_service.api.schemas.repositories import (
     RepositoryCreateRequest,
     RepositoryListResponse,
     RepositoryResponse,
+    RepositorySyncStateResponse,
 )
 from github_data_sync_service.api.schemas.sync_jobs import SyncJobCreateRequest, SyncJobResponse
 from github_data_sync_service.queue.service import SyncJobService
@@ -64,7 +65,16 @@ def create_repository_sync_job(
     result = service.create_repository_sync(
         repository_id=repository_id,
         resource_type=payload.resource_type,
+        mode=payload.mode,
     )
     response.status_code = status.HTTP_202_ACCEPTED if result.created else status.HTTP_200_OK
     response.headers["Location"] = f"/sync-jobs/{result.job.id}"
     return result.job
+
+
+@router.get("/{repository_id}/sync-state", response_model=RepositorySyncStateResponse)
+def get_repository_sync_state(
+    repository_id: uuid.UUID,
+    service: SyncJobServiceDep,
+) -> object:
+    return service.get_repository_sync_state(repository_id)

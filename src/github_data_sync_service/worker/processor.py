@@ -24,6 +24,7 @@ class IssuesPageClient(Protocol):
         *,
         per_page: int,
         max_pages: int,
+        since: datetime | None = None,
     ) -> Iterator[GitHubIssuePage]: ...
 
 
@@ -56,6 +57,7 @@ class IssueSyncProcessor:
             job.repository.name,
             per_page=self._settings.github_issues_per_page,
             max_pages=self._settings.github_max_pages_per_sync,
+            since=job.since_at if job.sync_mode == "incremental" else None,
         )
         page_number = 0
         while True:
@@ -126,6 +128,7 @@ class IssueSyncProcessor:
             "job_id": str(job.id),
             "repository_id": str(job.repository_id),
             "resource_type": job.resource_type,
+            "sync_mode": job.sync_mode,
             "page": page,
             "attempt": job.attempt_count,
             "worker_id": self._settings.worker_id,

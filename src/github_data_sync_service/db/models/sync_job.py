@@ -24,6 +24,11 @@ class SyncJobStatus(StrEnum):
     cancelled = "cancelled"
 
 
+class SyncMode(StrEnum):
+    full = "full"
+    incremental = "incremental"
+
+
 class SyncJob(Base):
     __tablename__ = "sync_jobs"
     __table_args__ = (
@@ -31,6 +36,7 @@ class SyncJob(Base):
             "status in ('pending', 'running', 'completed', 'failed', 'rate_limited', 'cancelled')",
             name="ck_sync_jobs_status",
         ),
+        CheckConstraint("sync_mode in ('full', 'incremental')", name="ck_sync_jobs_sync_mode"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -38,6 +44,11 @@ class SyncJob(Base):
         UUID(as_uuid=True), ForeignKey("repositories.id", ondelete="CASCADE"), nullable=False
     )
     resource_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    sync_mode: Mapped[str] = mapped_column(String(32), nullable=False, default=SyncMode.full.value)
+    cursor_before: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    since_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cursor_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    sync_window_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     status: Mapped[str] = mapped_column(
         String(32), nullable=False, default=SyncJobStatus.pending.value
     )

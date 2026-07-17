@@ -58,7 +58,12 @@ def get_repository_service(
 
 
 def get_sync_job_service(session: SessionDep) -> SyncJobService:
-    return SyncJobService(SyncJobStore(session), RepositoryStore(session))
+    settings = get_settings()
+    return SyncJobService(
+        SyncJobStore(session),
+        RepositoryStore(session),
+        overlap_seconds=settings.issues_sync_overlap_seconds,
+    )
 
 
 def get_issue_service(session: SessionDep) -> IssueService:

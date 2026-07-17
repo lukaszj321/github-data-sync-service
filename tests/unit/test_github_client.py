@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime, timedelta, timezone
 
 import httpx
 import pytest
 import respx
 
-from github_data_sync_service.github.client import GitHubClient
+from github_data_sync_service.github.client import GitHubClient, format_github_since
 from github_data_sync_service.github.errors import (
     GitHubBadResponseError,
     GitHubForbiddenError,
@@ -218,8 +219,25 @@ def test_issues_first_request_uses_required_params() -> None:
     assert page.fetched_count == 1
     assert params["state"] == "all"
     assert params["per_page"] == "100"
-    assert params["sort"] == "created"
+    assert params["sort"] == "updated"
     assert params["direction"] == "asc"
+    assert "since" not in params
+
+
+@respx.mock
+def test_issues_incremental_request_uses_utc_since_without_microseconds() -> None:
+    route = respx.get("https://api.github.test/repos/owner/repo/issues").mock(
+        return_value=httpx.Response(200, json=[])
+    )
+    since = datetime(2026, 7, 17, 14, 0, 0, 123456, tzinfo=timezone(timedelta(hours=2)))
+    list(make_client().iter_issues_pages("owner", "repo", per_page=50, max_pages=10, since=since))
+    params = route.calls[0].request.url.params
+    assert params["since"] == "2026-07-17T12:00:00Z"
+
+
+def test_format_github_since_rejects_naive_datetime() -> None:
+    with pytest.raises(ValueError, match="timezone-aware"):
+        format_github_since(datetime(2026, 7, 17, 12, 0, 0))
 
 
 @respx.mock
@@ -237,7 +255,7 @@ def test_issues_single_page_without_link() -> None:
 def test_issues_two_pages_follow_next_link_only() -> None:
     first = respx.get(
         "https://api.github.test/repos/owner/repo/issues",
-        params={"state": "all", "per_page": "50", "sort": "created", "direction": "asc"},
+        params={"state": "all", "per_page": "50", "sort": "updated", "direction": "asc"},
     ).mock(
         return_value=httpx.Response(
             200,
@@ -258,6 +276,47 @@ def test_issues_two_pages_follow_next_link_only() -> None:
     assert first.call_count == 1
     assert second.call_count == 1
     assert [page.issues[0].number for page in pages] == [1, 2]
+
+
+@respx.mock
+def test_issues_next_link_does_not_duplicate_since() -> None:
+    since = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
+    first = respx.get(
+        "https://api.github.test/repos/owner/repo/issues",
+        params={
+            "state": "all",
+            "per_page": "50",
+            "sort": "updated",
+            "direction": "asc",
+            "since": "2026-07-17T12:00:00Z",
+        },
+    ).mock(
+        return_value=httpx.Response(
+            200,
+            json=[issue_payload(1)],
+            headers={
+                "Link": (
+                    "<https://api.github.test/repos/owner/repo/issues?page=2&since=from-link>; "
+                    'rel="next"'
+                )
+            },
+        )
+    )
+    second = respx.get(
+        "https://api.github.test/repos/owner/repo/issues?page=2&since=from-link"
+    ).mock(return_value=httpx.Response(200, json=[issue_payload(2)]))
+    list(make_client().iter_issues_pages("owner", "repo", per_page=50, max_pages=10, since=since))
+    assert first.calls[0].request.url.params["since"] == "2026-07-17T12:00:00Z"
+    assert second.calls[0].request.url.params["since"] == "from-link"
+
+
+@respx.mock
+def test_issues_304_is_unexpected_without_conditional_headers() -> None:
+    respx.get("https://api.github.test/repos/owner/repo/issues").mock(
+        return_value=httpx.Response(304)
+    )
+    with pytest.raises(GitHubBadResponseError):
+        list(make_client().iter_issues_pages("owner", "repo", per_page=50, max_pages=10))
 
 
 @respx.mock

@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     github_max_attempts: int = Field(default=3, ge=1, alias="GITHUB_MAX_ATTEMPTS")
     github_issues_per_page: int = Field(default=100, ge=1, le=100, alias="GITHUB_ISSUES_PER_PAGE")
     github_max_pages_per_sync: int = Field(default=1000, ge=1, alias="GITHUB_MAX_PAGES_PER_SYNC")
+    issues_sync_overlap_seconds: int = Field(
+        default=60, ge=0, le=86400, alias="ISSUES_SYNC_OVERLAP_SECONDS"
+    )
     worker_poll_interval_seconds: float = Field(
         default=5, ge=0, alias="WORKER_POLL_INTERVAL_SECONDS"
     )

@@ -15,7 +15,8 @@ from alembic import command
 from github_data_sync_service.core.config import Settings
 from github_data_sync_service.db.models.issue import Issue
 from github_data_sync_service.db.models.repository import Repository
-from github_data_sync_service.db.models.sync_job import SyncJob, SyncJobStatus
+from github_data_sync_service.db.models.resource_sync_state import ResourceSyncState
+from github_data_sync_service.db.models.sync_job import SyncJob, SyncJobStatus, SyncMode
 from github_data_sync_service.github.errors import (
     GitHubBadResponseError,
     GitHubErrorDetails,
@@ -112,6 +113,7 @@ def add_repository_and_job(session: Session, *, resource_type: str = "issues") -
     job = SyncJob(
         repository_id=repo.id,
         resource_type=resource_type,
+        sync_mode=SyncMode.full.value,
         status=SyncJobStatus.pending.value,
         attempt_count=0,
         current_page=1,
@@ -131,6 +133,7 @@ def worker_settings() -> Settings:
         GITHUB_MAX_PAGES_PER_SYNC=10,
         WORKER_RATE_LIMIT_FALLBACK_SECONDS=60,
         WORKER_STALE_JOB_TIMEOUT_SECONDS=300,
+        ISSUES_SYNC_OVERLAP_SECONDS=60,
         WORKER_ID="worker-integration",
     )
 
@@ -173,6 +176,7 @@ def github_page(
 class FakeIssuesClient:
     def __init__(self, sequence: list[GitHubIssuePage | Exception]) -> None:
         self.sequence = sequence
+        self.calls: list[dict[str, object]] = []
 
     def iter_issues_pages(
         self,
@@ -181,7 +185,17 @@ class FakeIssuesClient:
         *,
         per_page: int,
         max_pages: int,
+        since: datetime | None = None,
     ) -> Iterator[GitHubIssuePage]:
+        self.calls.append(
+            {
+                "owner": owner,
+                "repo": repo,
+                "per_page": per_page,
+                "max_pages": max_pages,
+                "since": since,
+            }
+        )
         for item in self.sequence:
             if isinstance(item, Exception):
                 raise item
@@ -272,22 +286,34 @@ def test_issue_sync_first_rerun_update_and_no_duplicates(db_session: Session) ->
     repo = RepositoryStore(db_session).upsert_from_github(github_repo(github_id=30)).repository
     store = SyncJobStore(db_session)
 
-    first_job = store.create_or_get_active_job(repository_id=repo.id, resource_type="issues").job
+    first_started = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+    first_job = store.create_or_get_active_job(
+        repository_id=repo.id,
+        resource_type="issues",
+        now=first_started,
+    ).job
+    first_client = FakeIssuesClient(
+        [
+            github_page(
+                (github_issue(1), github_issue(3)),
+                fetched_count=3,
+                skipped=1,
+                request_id="page-1",
+            ),
+            github_page((github_issue(4),), request_id="page-2"),
+        ]
+    )
     first = run_claimed_job(
         db_session,
-        FakeIssuesClient(
-            [
-                github_page(
-                    (github_issue(1), github_issue(3)),
-                    fetched_count=3,
-                    skipped=1,
-                    request_id="page-1",
-                ),
-                github_page((github_issue(4),), request_id="page-2"),
-            ]
-        ),
+        first_client,
+        now=first_started,
     )
     assert first.id == first_job.id
+    assert first.sync_mode == SyncMode.full.value
+    assert first.cursor_before is None
+    assert first.since_at is None
+    assert first.cursor_after == first_started
+    assert first_client.calls[0]["since"] is None
     assert first.status == SyncJobStatus.completed.value
     assert first.current_page == 2
     assert first.fetched_count == 4
@@ -296,24 +322,45 @@ def test_issue_sync_first_rerun_update_and_no_duplicates(db_session: Session) ->
     assert first.updated_count == 0
     assert first.unchanged_count == 0
     assert [issue.number for issue in db_session.query(Issue).order_by(Issue.number)] == [1, 3, 4]
+    state = db_session.query(ResourceSyncState).filter_by(repository_id=repo.id).one()
+    assert state.resource_type == "issues"
+    assert state.cursor_at == first.sync_window_started_at
+    assert state.last_successful_job_id == first.id
+    assert state.last_sync_mode == SyncMode.full.value
 
-    second_job = store.create_or_get_active_job(repository_id=repo.id, resource_type="issues").job
+    second_started = datetime(2026, 1, 1, 0, 5, tzinfo=UTC)
+    second_job = store.create_or_get_active_job(
+        repository_id=repo.id,
+        resource_type="issues",
+        now=second_started,
+    ).job
+    second_client = FakeIssuesClient(
+        [
+            github_page((github_issue(1), github_issue(3)), fetched_count=3, skipped=1),
+            github_page((github_issue(4),)),
+        ]
+    )
     second = run_claimed_job(
         db_session,
-        FakeIssuesClient(
-            [
-                github_page((github_issue(1), github_issue(3)), fetched_count=3, skipped=1),
-                github_page((github_issue(4),)),
-            ]
-        ),
+        second_client,
+        now=second_started,
     )
     assert second.id == second_job.id
+    assert second.sync_mode == SyncMode.incremental.value
+    assert second.cursor_before == first.sync_window_started_at
+    assert second.since_at == first.sync_window_started_at - timedelta(seconds=60)
+    assert second_client.calls[0]["since"] == second.since_at
     assert second.created_count == 0
     assert second.updated_count == 0
     assert second.unchanged_count == 3
     assert db_session.query(Issue).count() == 3
 
-    third_job = store.create_or_get_active_job(repository_id=repo.id, resource_type="issues").job
+    third_started = datetime(2026, 1, 1, 0, 10, tzinfo=UTC)
+    third_job = store.create_or_get_active_job(
+        repository_id=repo.id,
+        resource_type="issues",
+        now=third_started,
+    ).job
     third = run_claimed_job(
         db_session,
         FakeIssuesClient(
@@ -329,12 +376,62 @@ def test_issue_sync_first_rerun_update_and_no_duplicates(db_session: Session) ->
                 github_page((github_issue(4),)),
             ]
         ),
+        now=third_started,
     )
     assert third.id == third_job.id
     assert third.created_count == 0
     assert third.updated_count == 1
     assert third.unchanged_count == 2
     assert db_session.query(Issue).count() == 3
+    db_session.refresh(state)
+    assert state.cursor_at == third.sync_window_started_at
+    assert state.last_successful_job_id == third.id
+    assert state.last_sync_mode == SyncMode.incremental.value
+
+
+def test_explicit_full_keeps_cursor_before_without_since(db_session: Session) -> None:
+    repo = RepositoryStore(db_session).upsert_from_github(github_repo(github_id=36)).repository
+    store = SyncJobStore(db_session)
+    first_started = datetime(2026, 1, 1, 1, 0, tzinfo=UTC)
+    first_job = store.create_or_get_active_job(
+        repository_id=repo.id,
+        resource_type="issues",
+        now=first_started,
+    ).job
+    first = run_claimed_job(
+        db_session,
+        FakeIssuesClient([github_page(())]),
+        now=first_started,
+    )
+    assert first.id == first_job.id
+
+    full_job = store.create_or_get_active_job(
+        repository_id=repo.id,
+        resource_type="issues",
+        requested_mode=SyncMode.full.value,
+    ).job
+    assert full_job.sync_mode == SyncMode.full.value
+    assert full_job.cursor_before == first.sync_window_started_at
+    assert full_job.since_at is None
+
+
+def test_active_job_is_returned_even_when_requested_mode_differs(db_session: Session) -> None:
+    repo = RepositoryStore(db_session).upsert_from_github(github_repo(github_id=37)).repository
+    store = SyncJobStore(db_session)
+    first = store.create_or_get_active_job(
+        repository_id=repo.id,
+        resource_type="issues",
+        requested_mode=SyncMode.incremental.value,
+    )
+    second = store.create_or_get_active_job(
+        repository_id=repo.id,
+        resource_type="issues",
+        requested_mode=SyncMode.full.value,
+    )
+    assert first.created is True
+    assert second.created is False
+    assert second.job.id == first.job.id
+    assert second.job.sync_mode == first.job.sync_mode
 
 
 def test_issue_sync_rate_limit_after_first_page_preserves_data(db_session: Session) -> None:
@@ -354,8 +451,10 @@ def test_issue_sync_rate_limit_after_first_page_preserves_data(db_session: Sessi
     assert result.status == SyncJobStatus.rate_limited.value
     assert result.available_at == now + timedelta(seconds=30)
     assert result.finished_at is None
+    assert result.cursor_after is None
     assert result.locked_by is None
     assert db_session.query(Issue).count() == 1
+    assert db_session.query(ResourceSyncState).count() == 0
 
 
 def test_issue_sync_later_page_failure_does_not_complete(db_session: Session) -> None:
@@ -373,9 +472,73 @@ def test_issue_sync_later_page_failure_does_not_complete(db_session: Session) ->
     )
     assert result.status == SyncJobStatus.failed.value
     assert result.finished_at is not None
+    assert result.cursor_after is None
     assert result.last_error is not None
     assert "bad third page" in result.last_error
     assert db_session.query(Issue).count() == 1
+    assert db_session.query(ResourceSyncState).count() == 0
+
+
+def test_completion_never_moves_cursor_backwards(db_session: Session) -> None:
+    repo = RepositoryStore(db_session).upsert_from_github(github_repo(github_id=38)).repository
+    old_window = datetime(2026, 1, 1, 2, 0, tzinfo=UTC)
+    new_window = datetime(2026, 1, 1, 2, 5, tzinfo=UTC)
+    old_job = SyncJob(
+        repository_id=repo.id,
+        resource_type="issues",
+        sync_mode=SyncMode.full.value,
+        status=SyncJobStatus.running.value,
+        sync_window_started_at=old_window,
+        attempt_count=1,
+        current_page=0,
+        fetched_count=0,
+        skipped_count=0,
+        created_count=0,
+        updated_count=0,
+        unchanged_count=0,
+        error_count=0,
+    )
+    new_job = SyncJob(
+        repository_id=repo.id,
+        resource_type="issues",
+        sync_mode=SyncMode.incremental.value,
+        status=SyncJobStatus.completed.value,
+        sync_window_started_at=new_window,
+        cursor_after=new_window,
+        finished_at=datetime(2026, 1, 1, 2, 6, tzinfo=UTC),
+        attempt_count=1,
+        current_page=0,
+        fetched_count=0,
+        skipped_count=0,
+        created_count=0,
+        updated_count=0,
+        unchanged_count=0,
+        error_count=0,
+    )
+    db_session.add_all([old_job, new_job])
+    db_session.commit()
+    state = ResourceSyncState(
+        repository_id=repo.id,
+        resource_type="issues",
+        cursor_at=new_window,
+        last_successful_job_id=new_job.id,
+        last_sync_mode=SyncMode.incremental.value,
+        last_started_at=new_window,
+        last_completed_at=datetime(2026, 1, 1, 2, 6, tzinfo=UTC),
+    )
+    db_session.add(state)
+    db_session.commit()
+
+    store = SyncJobStore(db_session)
+    store.complete_job(old_job.id, now=datetime(2026, 1, 1, 2, 7, tzinfo=UTC))
+
+    db_session.refresh(state)
+    assert state.cursor_at == new_window
+    assert state.last_successful_job_id == new_job.id
+    assert state.last_sync_mode == SyncMode.incremental.value
+    db_session.refresh(old_job)
+    assert old_job.status == SyncJobStatus.completed.value
+    assert old_job.cursor_after == old_window
 
 
 def test_issue_page_commit_failure_rolls_back_whole_page(
@@ -453,7 +616,11 @@ def test_recover_stale_running_job_only(db_session: Session) -> None:
     stale_job = SyncJob(
         repository_id=repo.id,
         resource_type="issues",
+        sync_mode=SyncMode.incremental.value,
         status=SyncJobStatus.running.value,
+        cursor_before=old - timedelta(minutes=1),
+        since_at=old - timedelta(minutes=2),
+        sync_window_started_at=old,
         available_at=old,
         locked_at=old,
         locked_by="old-worker",
@@ -469,6 +636,7 @@ def test_recover_stale_running_job_only(db_session: Session) -> None:
     fresh_job = SyncJob(
         repository_id=repo.id,
         resource_type="commits",
+        sync_mode=SyncMode.full.value,
         status=SyncJobStatus.running.value,
         available_at=fresh,
         locked_at=fresh,
@@ -495,4 +663,7 @@ def test_recover_stale_running_job_only(db_session: Session) -> None:
     assert stale_job.status == SyncJobStatus.pending.value
     assert stale_job.locked_by is None
     assert stale_job.error_count == 1
+    assert stale_job.cursor_before == old - timedelta(minutes=1)
+    assert stale_job.since_at == old - timedelta(minutes=2)
+    assert stale_job.sync_window_started_at == old
     assert fresh_job.status == SyncJobStatus.running.value

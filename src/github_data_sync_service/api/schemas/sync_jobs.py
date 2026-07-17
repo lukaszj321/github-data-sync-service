@@ -9,12 +9,18 @@ from pydantic import BaseModel, ConfigDict
 
 class SyncJobCreateRequest(BaseModel):
     resource_type: Literal["issues"]
+    mode: Literal["incremental", "full"] = "incremental"
 
 
 class SyncJobResponse(BaseModel):
     id: uuid.UUID
     repository_id: uuid.UUID
     resource_type: str
+    sync_mode: str
+    cursor_before: datetime | None
+    since_at: datetime | None
+    cursor_after: datetime | None
+    sync_window_started_at: datetime | None
     status: str
     attempt_count: int
     available_at: datetime

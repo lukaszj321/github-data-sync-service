@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 from github_data_sync_service.core.errors import AppError
+from github_data_sync_service.db.models.resource_sync_state import ResourceSyncState
 from github_data_sync_service.db.models.sync_job import SyncJobStatus
 from github_data_sync_service.github.errors import GitHubErrorDetails, GitHubRateLimitError
 from github_data_sync_service.github.models import (
@@ -111,8 +112,15 @@ def test_repository_store_upsert_list_get() -> None:
 
 
 class FakeQueueSession:
-    def __init__(self, job: object | None, *, execute_values: list[object] | None = None) -> None:
+    def __init__(
+        self,
+        job: object | None,
+        *,
+        state: object | None = None,
+        execute_values: list[object] | None = None,
+    ) -> None:
         self.job = job
+        self.state = state
         self.execute_values = execute_values or []
         self.added: object | None = None
         self.committed = False
@@ -122,6 +130,8 @@ class FakeQueueSession:
         return Begin()
 
     def scalars(self, statement: object) -> ScalarResult:
+        if "resource_sync_states" in str(statement):
+            return ScalarResult([] if self.state is None else [self.state])
         return ScalarResult([] if self.job is None else [self.job])
 
     def get(self, model: object, job_id: uuid.UUID) -> object | None:
@@ -155,6 +165,11 @@ def test_queue_claim_and_fail() -> None:
         locked_at=None,
         heartbeat_at=None,
         started_at=None,
+        sync_mode="full",
+        cursor_before=None,
+        since_at=None,
+        cursor_after=None,
+        sync_window_started_at=None,
         attempt_count=0,
         finished_at=None,
         current_page=7,
@@ -171,6 +186,7 @@ def test_queue_claim_and_fail() -> None:
     assert claimed is job
     assert job.status == SyncJobStatus.running.value
     assert job.locked_by == "worker"
+    assert job.sync_window_started_at is not None
     assert job.current_page == 0
     assert job.fetched_count == 0
     assert job.skipped_count == 0
@@ -179,6 +195,113 @@ def test_queue_claim_and_fail() -> None:
     assert job.status == SyncJobStatus.failed.value
     assert job.error_count == 1
     assert job.locked_by is None
+
+
+def test_queue_claim_rate_limited_retry_preserves_cursor_context() -> None:
+    window_started_at = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+    cursor_before = datetime(2025, 12, 31, 23, 59, tzinfo=UTC)
+    since_at = datetime(2025, 12, 31, 23, 58, tzinfo=UTC)
+    job = SimpleNamespace(
+        id=uuid.uuid4(),
+        status=SyncJobStatus.rate_limited.value,
+        available_at=datetime(2026, 1, 1, 0, 1, tzinfo=UTC),
+        locked_by=None,
+        locked_at=None,
+        heartbeat_at=None,
+        started_at=None,
+        sync_mode="incremental",
+        cursor_before=cursor_before,
+        since_at=since_at,
+        cursor_after=None,
+        sync_window_started_at=window_started_at,
+        attempt_count=1,
+        finished_at=None,
+        current_page=3,
+        fetched_count=10,
+        skipped_count=1,
+        created_count=2,
+        updated_count=3,
+        unchanged_count=4,
+        last_error="rate limited",
+        error_count=1,
+    )
+    claimed = SyncJobStore(FakeQueueSession(job)).claim_available_job(  # type: ignore[arg-type]
+        worker_id="worker",
+        now=datetime(2026, 1, 1, 0, 2, tzinfo=UTC),
+    )
+    assert claimed is job
+    assert job.sync_mode == "incremental"
+    assert job.cursor_before == cursor_before
+    assert job.since_at == since_at
+    assert job.sync_window_started_at == window_started_at
+    assert job.attempt_count == 2
+    assert job.current_page == 0
+    assert job.fetched_count == 0
+    assert job.skipped_count == 0
+    assert job.created_count == 0
+    assert job.updated_count == 0
+    assert job.unchanged_count == 0
+
+
+def test_queue_create_modes_and_overlap() -> None:
+    repository_id = uuid.uuid4()
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+
+    bootstrap_session = FakeQueueSession(None)
+    SyncJobStore(bootstrap_session).create_or_get_active_job(  # type: ignore[arg-type]
+        repository_id=repository_id,
+        resource_type="issues",
+        requested_mode="incremental",
+        overlap_seconds=60,
+        now=now,
+    )
+    bootstrap_job = bootstrap_session.added
+    assert bootstrap_job is not None
+    assert bootstrap_job.sync_mode == "full"
+    assert bootstrap_job.cursor_before is None
+    assert bootstrap_job.since_at is None
+
+    cursor_at = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    state = SimpleNamespace(cursor_at=cursor_at)
+    incremental_session = FakeQueueSession(None, state=state)
+    SyncJobStore(incremental_session).create_or_get_active_job(  # type: ignore[arg-type]
+        repository_id=repository_id,
+        resource_type="issues",
+        requested_mode="incremental",
+        overlap_seconds=60,
+        now=now,
+    )
+    incremental_job = incremental_session.added
+    assert incremental_job is not None
+    assert incremental_job.sync_mode == "incremental"
+    assert incremental_job.cursor_before == cursor_at
+    assert incremental_job.since_at == cursor_at - timedelta(seconds=60)
+
+    overlap_zero_session = FakeQueueSession(None, state=state)
+    SyncJobStore(overlap_zero_session).create_or_get_active_job(  # type: ignore[arg-type]
+        repository_id=repository_id,
+        resource_type="issues",
+        requested_mode="incremental",
+        overlap_seconds=0,
+        now=now,
+    )
+    overlap_zero_job = overlap_zero_session.added
+    assert overlap_zero_job is not None
+    assert overlap_zero_job.since_at == cursor_at
+
+    full_session = FakeQueueSession(None, state=state)
+    SyncJobStore(full_session).create_or_get_active_job(  # type: ignore[arg-type]
+        repository_id=repository_id,
+        resource_type="issues",
+        requested_mode="full",
+        overlap_seconds=60,
+        now=now,
+    )
+    full_job = full_session.added
+    assert full_job is not None
+    assert full_job.sync_mode == "full"
+    assert full_job.cursor_before == cursor_at
+    assert full_job.since_at is None
 
 
 def test_queue_create_list_get_complete_rate_limit_and_recover() -> None:
@@ -193,6 +316,11 @@ def test_queue_create_list_get_complete_rate_limit_and_recover() -> None:
         heartbeat_at=datetime(2026, 1, 1, tzinfo=UTC),
         started_at=None,
         finished_at=None,
+        sync_mode="full",
+        cursor_before=None,
+        since_at=None,
+        cursor_after=None,
+        sync_window_started_at=None,
         current_page=0,
         fetched_count=0,
         skipped_count=0,
@@ -237,8 +365,15 @@ def test_queue_create_list_get_complete_rate_limit_and_recover() -> None:
     assert job.fetched_count == 4
     assert job.skipped_count == 1
 
+    job.status = SyncJobStatus.running.value
+    job.sync_window_started_at = datetime(2026, 1, 1, 0, 2, tzinfo=UTC)
     store.complete_job(job.id)
     assert job.status == SyncJobStatus.completed.value
+    assert isinstance(session.added, ResourceSyncState)
+    assert session.added.cursor_at == job.sync_window_started_at
+    assert session.added.last_successful_job_id == job.id
+    assert session.added.last_sync_mode == "full"
+    assert job.cursor_after == job.sync_window_started_at
     assert job.locked_by is None
     assert job.last_error is None
 
@@ -250,6 +385,7 @@ def test_queue_create_list_get_complete_rate_limit_and_recover() -> None:
     store.rate_limit_job(job.id, error, available_at=available_at)
     assert job.status == SyncJobStatus.rate_limited.value
     assert job.available_at == available_at
+    assert job.cursor_after is None
     assert job.error_count == 1
 
     job.status = SyncJobStatus.running.value

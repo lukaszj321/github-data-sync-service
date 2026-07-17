@@ -8,6 +8,7 @@ from sqlalchemy import Select, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
+from github_data_sync_service.db.models.resource_sync_state import ResourceSyncState
 from github_data_sync_service.db.models.sync_job import SyncJob, SyncJobStatus
 from github_data_sync_service.github.errors import GitHubRateLimitError
 from github_data_sync_service.github.models import GitHubIssuePage
@@ -39,12 +40,31 @@ class SyncJobStore:
         *,
         repository_id: uuid.UUID,
         resource_type: str,
+        requested_mode: str = "incremental",
+        overlap_seconds: int = 60,
         now: datetime | None = None,
     ) -> CreateSyncJobResult:
         current_time = now or datetime.now(UTC)
+        state = self.get_resource_state(repository_id=repository_id, resource_type=resource_type)
+        cursor_before = state.cursor_at if state is not None else None
+        sync_mode = (
+            "incremental"
+            if requested_mode == "incremental" and cursor_before is not None
+            else "full"
+        )
+        since_at = (
+            cursor_before - timedelta(seconds=overlap_seconds)
+            if sync_mode == "incremental" and cursor_before is not None
+            else None
+        )
         job = SyncJob(
             repository_id=repository_id,
             resource_type=resource_type,
+            sync_mode=sync_mode,
+            cursor_before=cursor_before,
+            since_at=since_at,
+            cursor_after=None,
+            sync_window_started_at=None,
             status=SyncJobStatus.pending.value,
             attempt_count=0,
             available_at=current_time,
@@ -71,6 +91,18 @@ class SyncJobStore:
         self._session.refresh(job)
         return CreateSyncJobResult(job=job, created=True)
 
+    def get_resource_state(
+        self, *, repository_id: uuid.UUID, resource_type: str
+    ) -> ResourceSyncState | None:
+        return self._session.scalars(
+            select(ResourceSyncState)
+            .where(
+                ResourceSyncState.repository_id == repository_id,
+                ResourceSyncState.resource_type == resource_type,
+            )
+            .limit(1)
+        ).first()
+
     def get_active_job(self, *, repository_id: uuid.UUID, resource_type: str) -> SyncJob | None:
         return self._session.scalars(
             select(SyncJob)
@@ -91,6 +123,7 @@ class SyncJobStore:
         repository_id: uuid.UUID | None = None,
         status: str | None = None,
         resource_type: str | None = None,
+        mode: str | None = None,
     ) -> list[SyncJob]:
         stmt: Select[tuple[SyncJob]] = (
             select(SyncJob)
@@ -104,6 +137,8 @@ class SyncJobStore:
             stmt = stmt.where(SyncJob.status == status)
         if resource_type is not None:
             stmt = stmt.where(SyncJob.resource_type == resource_type)
+        if mode is not None:
+            stmt = stmt.where(SyncJob.sync_mode == mode)
         return list(self._session.scalars(stmt))
 
     def get(self, job_id: uuid.UUID) -> SyncJob | None:
@@ -136,6 +171,9 @@ class SyncJobStore:
         job.heartbeat_at = current_time
         job.started_at = current_time
         job.finished_at = None
+        if job.sync_window_started_at is None:
+            job.sync_window_started_at = current_time
+        job.cursor_after = None
         job.attempt_count += 1
         job.current_page = 0
         job.fetched_count = 0
@@ -182,17 +220,52 @@ class SyncJobStore:
 
     def complete_job(self, job_id: uuid.UUID, *, now: datetime | None = None) -> None:
         current_time = now or datetime.now(UTC)
-        job = self._session.get(SyncJob, job_id)
-        if job is None:
+        try:
+            job = self._session.scalars(
+                select(SyncJob).where(SyncJob.id == job_id).with_for_update()
+            ).first()
+            if job is None:
+                self._session.rollback()
+                return
+            if job.status != SyncJobStatus.running.value:
+                self._session.rollback()
+                return
+            if job.sync_window_started_at is None:
+                raise ValueError("Sync job is missing sync_window_started_at")
+            state = self._session.scalars(
+                select(ResourceSyncState)
+                .where(
+                    ResourceSyncState.repository_id == job.repository_id,
+                    ResourceSyncState.resource_type == job.resource_type,
+                )
+                .with_for_update()
+            ).first()
+            if state is None:
+                state = ResourceSyncState(
+                    repository_id=job.repository_id,
+                    resource_type=job.resource_type,
+                )
+                self._session.add(state)
+            cursor_candidate = job.sync_window_started_at
+            if state.cursor_at is None or cursor_candidate >= state.cursor_at:
+                state.cursor_at = cursor_candidate
+                state.last_successful_job_id = job.id
+                state.last_sync_mode = job.sync_mode
+                state.last_started_at = job.sync_window_started_at
+                state.last_completed_at = current_time
+            # If an older recovered job completes after a newer job, keep the newer
+            # high-watermark so the durable cursor never moves backwards.
+            job.cursor_after = cursor_candidate
+            job.status = SyncJobStatus.completed.value
+            job.finished_at = current_time
+            job.last_error = None
+            job.locked_by = None
+            job.locked_at = None
+            job.heartbeat_at = None
+            self._session.commit()
+        except Exception:
             self._session.rollback()
-            return
-        job.status = SyncJobStatus.completed.value
-        job.finished_at = current_time
-        job.last_error = None
-        job.locked_by = None
-        job.locked_at = None
-        job.heartbeat_at = None
-        self._session.commit()
+            raise
 
     def fail_job(self, job_id: uuid.UUID, message: str) -> None:
         current_time = datetime.now(UTC)
@@ -202,6 +275,7 @@ class SyncJobStore:
             return
         job.status = SyncJobStatus.failed.value
         job.finished_at = current_time
+        job.cursor_after = None
         job.last_error = _safe_error(message)
         job.error_count += 1
         job.locked_by = None
@@ -222,6 +296,7 @@ class SyncJobStore:
             return
         job.status = SyncJobStatus.rate_limited.value
         job.available_at = available_at
+        job.cursor_after = None
         job.last_error = _safe_error(str(error))
         job.error_count += 1
         job.github_request_id = error.details.github_request_id

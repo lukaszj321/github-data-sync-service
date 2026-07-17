@@ -37,3 +37,16 @@ class RepositoryListResponse(BaseModel):
     items: list[RepositoryResponse]
     limit: int
     offset: int
+
+
+class RepositorySyncStateResponse(BaseModel):
+    repository_id: uuid.UUID
+    resource_type: str
+    initialized: bool
+    cursor_at: datetime | None
+    last_successful_job_id: uuid.UUID | None
+    last_sync_mode: str | None
+    last_started_at: datetime | None
+    last_completed_at: datetime | None
+
+    model_config = ConfigDict(from_attributes=True)
